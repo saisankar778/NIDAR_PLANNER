@@ -1,0 +1,17 @@
+Flask
+flask-cors
+Werkzeug
+opencv-python
+numpy
+ultralytics
+torch
+shapely
+dronekit
+matplotlib
+pyserial
+google-auth
+google-auth-oauthlib
+google-api-python-client
+Pillow
+pywinauto
+gspread

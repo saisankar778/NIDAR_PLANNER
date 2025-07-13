@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Survey Grid Mission Planner</title>
+    <link href="static/tailwind.min.css" rel="stylesheet">
+    <link href="static/leaflet.css" rel="stylesheet">
+    <style>
+        #map { height: 400px; border-radius: 1rem; }
+        html, body { height: 100%; }
+
+        :root {
+          --covered-path-color: #FFD600;
+          --uncovered-path-color: #ba6900;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-green-50 min-h-screen">
+
+    <div class="min-h-screen flex items-center justify-center bg-gray-100">
+        <div class="bg-white rounded-2xl shadow-2xl w-full flex flex-row p-14 gap-14">
+            <!-- Left: Mission Controls -->
+            <div class="w-full max-w-md flex flex-col justify-between">
+                <div>
+                    <h2 class="text-2xl font-bold mb-4 text-blue-700">Mission Controls</h2>
+                    <!-- KML Upload -->
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-1">Upload KML File</label>
+                        <input type="file" id="kmlFile" accept=".kml" class="p-3 border rounded w-full" />
+                        <button onclick="uploadKML()" class="mt-2 bg-blue-500 text-white px-4 py-2 rounded-lg w-full">Upload KML</button>
+                    </div>
+                    <!-- Grid Spacing -->
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-1">Grid Spacing (meters)</label>
+                        <input type="number" id="gridSpacing" value="43" min="5" max="50" class="p-3 border rounded w-full" />
+                        <button onclick="generateGrid()" class="mt-2 bg-green-500 text-white px-4 py-2 rounded-lg w-full">Generate Grid</button>
+                    </div>
+                    <!-- Start Mission -->
+                    <button onclick="startMission(1)" id="startMission1" class="w-full bg-red-500 text-white px-4 py-2 rounded-lg mb-4">Start Mission</button>
+
+                    <!-- Drone Video Stream -->
+                    <div class="mb-4">
+                        <h2 class="text-xl font-semibold mb-3 text-blue-600">Drone Video Stream</h2>
+                        <img id="cameraFeed" src="/video_feed" style="width: 100%; height: 180px; background: #222; object-fit: cover; border-radius: 0.5rem;" />
+                        <div class="text-xs text-gray-600 mt-2">
+                            Person detection: <span id="personDetected">No</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- Drone Controls -->
+                <div class="bg-yellow-50 rounded-xl shadow p-4 mb-4">
+                    <div class="flex flex-row gap-4">
+                        <div class="flex-1">
+                            <h3 class="font-semibold text-blue-700 mb-2">Drone 1</h3>
+                            <input type="text" id="drone1Connection" value="tcp:127.0.0.1:14550" class="w-full p-2 border rounded mb-2" />
+                            <button onclick="connectDrone(1)" id="connectDrone1" class="w-full bg-green-500 text-white px-3 py-2 rounded-lg mb-2">Connect</button>
+                            <button onclick="disconnectDrone(1)" id="disconnectDrone1" class="w-full bg-gray-500 text-white px-3 py-2 rounded-lg mb-2" disabled>Disconnect</button>
+                            <button onclick="triggerRTL(1)" id="rtlDrone1" class="w-full bg-yellow-500 text-white px-3 py-2 rounded-lg">RTL</button>
+                        </div>
+                        <div class="flex-1">
+                            <h3 class="font-semibold text-green-700 mb-2">Drone 2</h3>
+                            <input type="text" id="drone2Connection" value="udp:127.0.0.1:14560" class="w-full p-2 border rounded mb-2" />
+                            <button onclick="connectDrone(2)" id="connectDrone2" class="w-full bg-green-500 text-white px-3 py-2 rounded-lg mb-2">Connect</button>
+                            <button onclick="disconnectDrone(2)" id="disconnectDrone2" class="w-full bg-gray-500 text-white px-3 py-2 rounded-lg mb-2" disabled>Disconnect</button>
+                            <button onclick="triggerRTL(2)" id="rtlDrone2" class="w-full bg-yellow-500 text-white px-3 py-2 rounded-lg">RTL</button>
+                        </div>
+                    </div>
+                </div>
+                <!-- Status/Error -->
+                <div id="status" class="p-3 bg-gray-100 rounded-xl text-sm text-center shadow-inner"></div>
+            </div>
+            <!-- Right: Mission Map -->
+            <div class="flex-1 flex flex-col">
+                <h2 class="text-2xl font-bold mb-4 text-blue-700">Mission Map</h2>
+                <div id="map" class="rounded-2xl shadow-lg flex-1 min-h-[400px]"></div>
+                <!-- Drone Details Section -->
+                <div class="bg-gray-50 p-4 rounded-xl text-sm shadow-inner mt-6">
+                    <h4 class="font-semibold mb-2">Drone Status</h4>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <h5 class="font-semibold text-blue-700 mb-1">Drone 1</h5>
+                            <div>Mode: <span id="drone1Mode">--</span></div>
+                            <div>Armed: <span id="drone1Armed">--</span></div>
+                            <div>Battery: <span id="drone1Battery">--</span></div>
+                            <div>Altitude: <span id="drone1StatusAltitude">--</span></div>
+                        </div>
+                        <div>
+                            <h5 class="font-semibold text-green-700 mb-1">Drone 2</h5>
+                            <div>Mode: <span id="drone2Mode">--</span></div>
+                            <div>Armed: <span id="drone2Armed">--</span></div>
+                            <div>Battery: <span id="drone2Battery">--</span></div>
+                            <div>Altitude: <span id="drone2StatusAltitude">--</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- Loading Indicator -->
+        <div id="loading" class="loading fixed inset-0 bg-gray-500 bg-opacity-50 flex items-center justify-center z-50" style="display: none;">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
+            <p class="mt-4 text-center text-white">Processing...</p>
+        </div>
+    </div>
+
+    <script src="static/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+    <script>
+        // Initialize Leaflet map
+        const map = L.map('map').setView([0, 0], 2);
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            attribution: 'Tiles © Esri'
+        }).addTo(map);
+
+        const droneIcon = L.icon({
+            iconUrl: 'static/drone.png', // Place a drone.png in your static folder
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+        });
+        let droneMarker = null;
+        let dronePath = [];
+        let dronePolyline = null;
+        let missionPolyline = null;
+
+        let currentPolygon = null;
+        let currentGeofence = null;
+        let currentGrid = null;
+        let droneMarkers = {1: null, 2: null};
+        let gridPath = null;
+        let geofencePath = null;
+        let lastPersonDetected = false;
+
+        // === Path color settings (change here as needed) ===
+        const COVERED_PATH_COLOR = "#FFD600"; // Yellow
+const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
+
+        // File upload and grid generation functions
+        async function uploadKML() {
+            const fileInput = document.getElementById('kmlFile');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                showStatus('Please select a KML file', 'error');
+                return;
+            }
+
+            showLoading();
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload-kml', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    // Clear existing layers
+                    if (currentPolygon) map.removeLayer(currentPolygon);
+                    if (currentGeofence) map.removeLayer(currentGeofence);
+
+                    // Add polygon
+                    currentPolygon = L.polygon(result.coordinates, {color: 'blue', fillColor: 'cyan', fillOpacity: 0.3}).addTo(map);
+
+                    // Add geofence
+                    currentGeofence = L.polygon(result.geofence, {
+                        color: 'red', 
+                        fillColor: 'red', 
+                        fillOpacity: 0.1,
+                        dashArray: '5, 5'
+                    }).addTo(map);
+
+                    map.fitBounds(currentPolygon.getBounds());
+                    showStatus('KML uploaded successfully!', 'success');
+                } else {
+                    showStatus('Error: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('Upload failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function generateGrid() {
+            if (!currentPolygon) {
+                showStatus('Please upload KML file first', 'error');
+                return;
+            }
+
+            const spacing = document.getElementById('gridSpacing').value;
+            showLoading();
+
+            try {
+                const response = await fetch('/generate-grid', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({spacing: parseFloat(spacing)})
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    // Clear existing grid
+                    if (gridPath) map.removeLayer(gridPath);
+
+                    // Add grid path
+                    gridPath = L.polyline(result.grid, {color: 'green', weight: 3, opacity: 0.8}).addTo(map);
+
+                    // Add waypoint markers
+                    result.grid.forEach((point, index) => {
+                        L.circleMarker(point, {radius: 3, color: 'green', fillColor: 'green'})
+                         .bindPopup(`Waypoint ${index + 1}`).addTo(map);
+                    });
+
+                    showStatus(`Grid generated with ${result.grid.length} waypoints`, 'success');
+                } else {
+                    showStatus('Error: ' + result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('Grid generation failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // Helper functions for showing and hiding status and loading indicators
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            const colors = {
+                'success': 'text-green-600',
+                'error': 'text-red-600',
+                'info': 'text-blue-600'
+            };
+            statusDiv.innerHTML = `<span class="${colors[type]}">${message}</span>`;
+        }
+
+        function showLoading() {
+            document.getElementById('loading').style.display = 'flex';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        // --- Drone Control Functions ---
+        async function connectDrone(droneId) {
+            const inputId = droneId === 1 ? 'drone1Connection' : 'drone2Connection';
+            const connectionString = document.getElementById(inputId).value;
+            showLoading();
+            try {
+                const response = await fetch('/connect-drone', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({drone_id: droneId, connection_string: connectionString})
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showStatus(result.message, 'success');
+                    document.getElementById(`connectDrone${droneId}`).disabled = true;
+                    document.getElementById(`disconnectDrone${droneId}`).disabled = false;
+                } else {
+                    showStatus(result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('Connect failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function disconnectDrone(droneId) {
+            showLoading();
+            try {
+                const response = await fetch('/disconnect-drone', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({drone_id: droneId})
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showStatus(result.message, 'success');
+                    document.getElementById(`connectDrone${droneId}`).disabled = false;
+                    document.getElementById(`disconnectDrone${droneId}`).disabled = true;
+                } else {
+                    showStatus(result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('Disconnect failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function triggerRTL(droneId) {
+            showLoading();
+            try {
+                const response = await fetch('/trigger-rtl', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({drone_id: droneId})
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showStatus('RTL triggered for Drone ' + droneId, 'success');
+                } else {
+                    showStatus(result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('RTL failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        async function startMission(droneId) {
+            showLoading();
+            try {
+                // Use current grid from backend (no need to send grid from frontend)
+                const response = await fetch('/start-mission', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({drone_id: droneId})
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showStatus(result.message, 'success');
+                } else {
+                    showStatus(result.error, 'error');
+                }
+            } catch (error) {
+                showStatus('Start mission failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // --- Drone Status Polling ---
+        async function pollDroneStatus() {
+            try {
+                const response = await fetch('/drone-status');
+                const result = await response.json();
+                if (result.drones) {
+                    for (let i = 1; i <= 2; i++) {
+                        const status = result.drones[i]?.status || {};
+                        document.getElementById(`drone${i}Mode`).textContent = status.mode || '--';
+                        document.getElementById(`drone${i}Armed`).textContent = status.armed !== undefined ? status.armed : '--';
+                        document.getElementById(`drone${i}Battery`).textContent = status.battery !== undefined ? status.battery : '--';
+                        document.getElementById(`drone${i}StatusAltitude`).textContent = status.altitude !== undefined ? status.altitude : '--';
+                    }
+                }
+                // Update person detection status
+                if (typeof result.person_detected !== "undefined") {
+                    document.getElementById("personDetected").textContent = result.person_detected ? "Yes" : "No";
+                }
+
+                const drone1 = result.drones[1]?.status;
+                if (drone1 && drone1.latitude && drone1.longitude) {
+                    const latlng = [drone1.latitude, drone1.longitude];
+                    // Update marker
+                    if (!droneMarker) {
+                        droneMarker = L.marker(latlng, {icon: droneIcon}).addTo(map);
+                    } else {
+                        droneMarker.setLatLng(latlng);
+                    }
+                    // Update path
+                    dronePath.push(latlng);
+                    if (dronePolyline) map.removeLayer(dronePolyline);
+                    dronePolyline = L.polyline(dronePath, {color: 'green'}).addTo(map);
+                }
+
+                // To show the mission path in red (uncovered), you need to know the waypoints.
+                // Suppose you have an array missionWaypoints = [[lat1, lon1], [lat2, lon2], ...]
+                // You can draw the remaining path in red:
+                if (missionWaypoints && missionWaypoints.length > 0) {
+                    // Find the index of the last covered waypoint
+                    let lastIdx = 0;
+                    for (let i = 0; i < missionWaypoints.length; i++) {
+                        if (L.latLng(missionWaypoints[i]).distanceTo(droneMarker.getLatLng()) < 10) {
+                            lastIdx = i;
+                        }
+                    }
+                    // Covered path (Yellow)
+                    if (dronePolyline) map.removeLayer(dronePolyline);
+                    dronePolyline = L.polyline(missionWaypoints.slice(0, lastIdx + 1), {color: COVERED_PATH_COLOR, weight: 5}).addTo(map);
+
+                    // Uncovered path (Orange)
+                    if (missionPolyline) map.removeLayer(missionPolyline);
+                    missionPolyline = L.polyline(missionWaypoints.slice(lastIdx), {color: UNCOVERED_PATH_COLOR, weight: 5, dashArray: '5, 10'}).addTo(map);
+                }
+            } catch (error) {
+                // Optionally show error
+            }
+        }
+        setInterval(pollDroneStatus, 2000);
+    </script>
+
+</body>
+</html>
