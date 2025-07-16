@@ -7,12 +7,15 @@
     <link href="static/tailwind.min.css" rel="stylesheet">
     <link href="static/leaflet.css" rel="stylesheet">
     <style>
-        #map { height: 400px; border-radius: 1rem; }
         html, body { height: 100%; }
+        #map { height: 400px; border-radius: 1rem; }
 
         :root {
-          --covered-path-color: #FFD600;
-          --uncovered-path-color: #ba6900;
+            --covered-path-color: #ffda1f;      /* Yellow for covered path */
+            --uncovered-path-color: #02be4a;    /* Orange for uncovered path */
+            --grid-line-color: #05dd7c;         /* Blue for grid lines */
+            --geofence-border-color: #FF1744;   /* Red for geofence border */
+            --geofence-fill-color: #FFCDD2;     /* Light red for geofence fill */
         }
     </style>
 </head>
@@ -24,18 +27,18 @@
             <div class="w-full max-w-md flex flex-col justify-between">
                 <div>
                     <h2 class="text-2xl font-bold mb-4 text-blue-700">Mission Controls</h2>
-                    <!-- KML Upload -->
+                <!-- KML Upload -->
                     <div class="mb-4">
                         <label class="block text-gray-700 text-sm font-bold mb-1">Upload KML File</label>
                         <input type="file" id="kmlFile" accept=".kml" class="p-3 border rounded w-full" />
                         <button onclick="uploadKML()" class="mt-2 bg-blue-500 text-white px-4 py-2 rounded-lg w-full">Upload KML</button>
-                    </div>
+                </div>
                     <!-- Grid Spacing -->
                     <div class="mb-4">
                         <label class="block text-gray-700 text-sm font-bold mb-1">Grid Spacing (meters)</label>
                         <input type="number" id="gridSpacing" value="43" min="5" max="50" class="p-3 border rounded w-full" />
                         <button onclick="generateGrid()" class="mt-2 bg-green-500 text-white px-4 py-2 rounded-lg w-full">Generate Grid</button>
-                    </div>
+                </div>
                     <!-- Start Mission -->
                     <button onclick="startMission(1)" id="startMission1" class="w-full bg-red-500 text-white px-4 py-2 rounded-lg mb-4">Start Mission</button>
 
@@ -45,9 +48,9 @@
                         <img id="cameraFeed" src="/video_feed" style="width: 100%; height: 180px; background: #222; object-fit: cover; border-radius: 0.5rem;" />
                         <div class="text-xs text-gray-600 mt-2">
                             Person detection: <span id="personDetected">No</span>
-                        </div>
-                    </div>
-                </div>
+                                </div>
+                                </div>
+                            </div>
                 <!-- Drone Controls -->
                 <div class="bg-yellow-50 rounded-xl shadow p-4 mb-4">
                     <div class="flex flex-row gap-4">
@@ -96,11 +99,13 @@
                 </div>
             </div>
         </div>
-        <!-- Loading Indicator -->
-        <div id="loading" class="loading fixed inset-0 bg-gray-500 bg-opacity-50 flex items-center justify-center z-50" style="display: none;">
+        <!-- Loading Indicator (always on top, overlays everything) -->
+        <div id="loading" class="fixed inset-0 bg-gray-500 bg-opacity-50 flex items-center justify-center" style="display: none; z-index: 2147483647;">
             <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto"></div>
-            <p class="mt-4 text-center text-white">Processing...</p>
+            <p class="mt-4 text-center text-white"></p>
         </div>
+        <!-- Status/Error as Toast Popup -->
+        <div id="toast" style="display:none;position:fixed;top:30px;left:50%;transform:translateX(-50%);z-index:2147483647;min-width:200px;padding:12px 24px;background:#222;color:#fff;border-radius:8px;font-size:1rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);text-align:center;"></div>
     </div>
 
     <script src="static/leaflet.js"></script>
@@ -115,7 +120,7 @@
         }).addTo(map);
 
         const droneIcon = L.icon({
-            iconUrl: 'static/drone.png', // Place a drone.png in your static folder
+            iconUrl: 'static/D.png', // Place a drone.png in your static folder
             iconSize: [40, 40],
             iconAnchor: [20, 20]
         });
@@ -131,13 +136,44 @@
         let gridPath = null;
         let geofencePath = null;
         let lastPersonDetected = false;
+        let personMarkers = [];
+
+        let hasEnteredPolygon = false;
+        let wasInsidePolygon = false;
 
         // === Path color settings (change here as needed) ===
-        const COVERED_PATH_COLOR = "#FFD600"; // Yellow
-const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
+        const COVERED_PATH_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--covered-path-color').trim();
+const UNCOVERED_PATH_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--uncovered-path-color').trim();
+const GRID_LINE_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--grid-line-color').trim();
+const GEOFENCE_BORDER_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--geofence-border-color').trim();
+const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getPropertyValue('--geofence-fill-color').trim();
 
         // File upload and grid generation functions
         async function uploadKML() {
+            // Clear existing layers and arrays before uploading new KML
+            if (gridPath) {
+                map.removeLayer(gridPath);
+                gridPath = null;
+            }
+            if (dronePolyline) {
+                map.removeLayer(dronePolyline);
+                dronePolyline = null;
+            }
+            if (missionPolyline) {
+                map.removeLayer(missionPolyline);
+                missionPolyline = null;
+            }
+            if (droneMarker) {
+                map.removeLayer(droneMarker);
+                droneMarker = null;
+            }
+            dronePath = [];
+            if (window.gridMarkers) {
+                window.gridMarkers.forEach(m => map.removeLayer(m));
+                window.gridMarkers = [];
+            }
+
+            showLoading();
             const fileInput = document.getElementById('kmlFile');
             const file = fileInput.files[0];
 
@@ -146,7 +182,6 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
                 return;
             }
 
-            showLoading();
             const formData = new FormData();
             formData.append('file', file);
 
@@ -163,7 +198,7 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
                     if (currentGeofence) map.removeLayer(currentGeofence);
 
                     // Add polygon
-                    currentPolygon = L.polygon(result.coordinates, {color: 'blue', fillColor: 'cyan', fillOpacity: 0.3}).addTo(map);
+                    currentPolygon = L.polygon(result.coordinates, {color: 'blue', fillColor: 'cyan', fillOpacity: 0.2}).addTo(map);
 
                     // Add geofence
                     currentGeofence = L.polygon(result.geofence, {
@@ -186,19 +221,36 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
         }
 
         async function generateGrid() {
-            if (!currentPolygon) {
-                showStatus('Please upload KML file first', 'error');
-                return;
+            // Clear existing layers and arrays before generating new grid
+            if (gridPath) {
+                map.removeLayer(gridPath);
+                gridPath = null;
+            }
+            if (dronePolyline) {
+                map.removeLayer(dronePolyline);
+                dronePolyline = null;
+            }
+            if (missionPolyline) {
+                map.removeLayer(missionPolyline);
+                missionPolyline = null;
+            }
+            if (droneMarker) {
+                map.removeLayer(droneMarker);
+                droneMarker = null;
+            }
+            dronePath = [];
+            if (window.gridMarkers) {
+                window.gridMarkers.forEach(m => map.removeLayer(m));
+                window.gridMarkers = [];
             }
 
-            const spacing = document.getElementById('gridSpacing').value;
             showLoading();
 
             try {
                 const response = await fetch('/generate-grid', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({spacing: parseFloat(spacing)})
+                    body: JSON.stringify({spacing: parseFloat(document.getElementById('gridSpacing').value)})
                 });
                 const result = await response.json();
 
@@ -207,7 +259,12 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
                     if (gridPath) map.removeLayer(gridPath);
 
                     // Add grid path
-                    gridPath = L.polyline(result.grid, {color: 'green', weight: 3, opacity: 0.8}).addTo(map);
+                    gridPath = L.polyline(result.grid, {
+                        color: GRID_LINE_COLOR,
+                        weight: 2,
+                        opacity: 0.7,
+                        dashArray: '8, 8'
+                    }).addTo(map);
 
                     // Add waypoint markers
                     result.grid.forEach((point, index) => {
@@ -235,6 +292,15 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
                 'info': 'text-blue-600'
             };
             statusDiv.innerHTML = `<span class="${colors[type]}">${message}</span>`;
+
+            // Show toast popup
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.display = 'block';
+            toast.style.backgroundColor = type === 'error' ? '#d9534f' : '#5cb85c'; // Red for error, green for success
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 5000); // Hide after 5 seconds
         }
 
         function showLoading() {
@@ -333,7 +399,7 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
             } catch (error) {
                 showStatus('Start mission failed: ' + error.message, 'error');
             } finally {
-                hideLoading();
+            hideLoading();
             }
         }
 
@@ -365,36 +431,45 @@ const UNCOVERED_PATH_COLOR = "#FF9100"; // Orange
                     } else {
                         droneMarker.setLatLng(latlng);
                     }
-                    // Update path
+                    // Always draw the drone path regardless of polygon presence
                     dronePath.push(latlng);
                     if (dronePolyline) map.removeLayer(dronePolyline);
-                    dronePolyline = L.polyline(dronePath, {color: 'green'}).addTo(map);
-                }
-
-                // To show the mission path in red (uncovered), you need to know the waypoints.
-                // Suppose you have an array missionWaypoints = [[lat1, lon1], [lat2, lon2], ...]
-                // You can draw the remaining path in red:
-                if (missionWaypoints && missionWaypoints.length > 0) {
-                    // Find the index of the last covered waypoint
-                    let lastIdx = 0;
-                    for (let i = 0; i < missionWaypoints.length; i++) {
-                        if (L.latLng(missionWaypoints[i]).distanceTo(droneMarker.getLatLng()) < 10) {
-                            lastIdx = i;
-                        }
-                    }
-                    // Covered path (Yellow)
-                    if (dronePolyline) map.removeLayer(dronePolyline);
-                    dronePolyline = L.polyline(missionWaypoints.slice(0, lastIdx + 1), {color: COVERED_PATH_COLOR, weight: 5}).addTo(map);
-
-                    // Uncovered path (Orange)
-                    if (missionPolyline) map.removeLayer(missionPolyline);
-                    missionPolyline = L.polyline(missionWaypoints.slice(lastIdx), {color: UNCOVERED_PATH_COLOR, weight: 5, dashArray: '5, 10'}).addTo(map);
+                    dronePolyline = L.polyline(dronePath, {color: COVERED_PATH_COLOR, weight: 5}).addTo(map);
                 }
             } catch (error) {
-                // Optionally show error
+                console.error('Error polling drone status:', error);
             }
         }
         setInterval(pollDroneStatus, 2000);
+
+        // Person location functions
+        async function loadPersonLocations() {
+            // Remove old markers
+            personMarkers.forEach(m => map.removeLayer(m));
+            personMarkers = [];
+
+            const response = await fetch('/person-locations');
+            const locations = await response.json();
+            locations.forEach(loc => {
+                const marker = L.marker([loc.lat, loc.lon], {
+                    icon: L.icon({
+                        iconUrl: 'static/person.png', // Place a person.png icon in your static folder
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 32]
+                    })
+                }).addTo(map);
+                marker.bindTooltip(
+                    `Person ${loc.person}: ${loc.lat.toFixed(6)}, ${loc.lon.toFixed(6)}`,
+                    {permanent: false, direction: 'top'}
+                );
+                personMarkers.push(marker);
+            });
+        }
+
+        // Initial load
+        loadPersonLocations();
+        // Optional: refresh every 5 seconds
+        setInterval(loadPersonLocations, 5000);
     </script>
 
 </body>

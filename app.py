@@ -12,19 +12,11 @@ import numpy as np
 from xml.dom import minidom
 from shapely.geometry import Polygon, Point, LineString
 from dronekit import connect, VehicleMode, LocationGlobalRelative, Command
-import gspread
-from google.oauth2.service_account import Credentials
 from pymavlink import mavutil
 import csv
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend communication
-
-# Google Sheets setup
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-creds = Credentials.from_service_account_file("credentials/service_account.json", scopes=SCOPES)
-client = gspread.authorize(creds)
-sheet = client.open("hello").sheet1
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = YOLO("yolov8n.pt").to(device)
@@ -459,11 +451,11 @@ def person_detected():
             with open("drone_logs.csv", "a", newline="") as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerow([
-                    "Person Detected - Drone 1",
+                    f"Person Detected - Drone {drone_id}",
                     location.lat, location.lon, location.alt,
                     time.strftime("%Y-%m-%d %H:%M:%S")
                 ])
-            print("Location sent to CSV!")
+            print(f"Location sent to CSV!")
         # Resume mission
         vehicle.mode = VehicleMode("AUTO")
         return jsonify({
@@ -479,6 +471,25 @@ person_detected_drone1 = False
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/person-locations', methods=['GET'])
+def person_locations():
+    locations = []
+    with open('drone_logs.csv', newline='') as csvfile:
+        reader = csv.reader(csvfile)
+        next(reader)  # Skip header
+        person_count = 1
+        for row in reader:
+            if row and row[0].startswith("Person Detected"):
+                lat = float(row[1])
+                lon = float(row[2])
+                locations.append({
+                    "person": person_count,
+                    "lat": lat,
+                    "lon": lon
+                })
+                person_count += 1
+    return jsonify(locations)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
