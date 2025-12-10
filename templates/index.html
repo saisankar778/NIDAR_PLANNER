@@ -56,14 +56,14 @@
                     <div class="flex flex-row gap-4">
                         <div class="flex-1">
                             <h3 class="font-semibold text-blue-700 mb-2">Drone 1</h3>
-                            <input type="text" id="drone1Connection" value="tcp:127.0.0.1:14550" class="w-full p-2 border rounded mb-2" />
+                            <input type="text" id="drone1Connection" value="udp:127.0.0.1:14560" class="w-full p-2 border rounded mb-2" />
                             <button onclick="connectDrone(1)" id="connectDrone1" class="w-full bg-green-500 text-white px-3 py-2 rounded-lg mb-2">Connect</button>
                             <button onclick="disconnectDrone(1)" id="disconnectDrone1" class="w-full bg-gray-500 text-white px-3 py-2 rounded-lg mb-2" disabled>Disconnect</button>
                             <button onclick="triggerRTL(1)" id="rtlDrone1" class="w-full bg-yellow-500 text-white px-3 py-2 rounded-lg">RTL</button>
                         </div>
                         <div class="flex-1">
                             <h3 class="font-semibold text-green-700 mb-2">Drone 2</h3>
-                            <input type="text" id="drone2Connection" value="udp:127.0.0.1:14560" class="w-full p-2 border rounded mb-2" />
+                            <input type="text" id="drone2Connection" value="udp:127.0.0.1:14580" class="w-full p-2 border rounded mb-2" />
                             <button onclick="connectDrone(2)" id="connectDrone2" class="w-full bg-green-500 text-white px-3 py-2 rounded-lg mb-2">Connect</button>
                             <button onclick="disconnectDrone(2)" id="disconnectDrone2" class="w-full bg-gray-500 text-white px-3 py-2 rounded-lg mb-2" disabled>Disconnect</button>
                             <button onclick="triggerRTL(2)" id="rtlDrone2" class="w-full bg-yellow-500 text-white px-3 py-2 rounded-lg">RTL</button>
@@ -111,6 +111,7 @@
     <script src="static/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <script src="https://unpkg.com/leaflet-polylinedecorator@1.7.0/dist/leaflet.polylineDecorator.min.js"></script>
 
     <script>
         // Initialize Leaflet map
@@ -119,12 +120,17 @@
             attribution: 'Tiles © Esri'
         }).addTo(map);
 
-        const droneIcon = L.icon({
-            iconUrl: 'static/D.png', // Place a drone.png in your static folder
+        const droneIcon1 = L.icon({
+            iconUrl: 'static/D.png',
             iconSize: [40, 40],
             iconAnchor: [20, 20]
         });
-        let droneMarker = null;
+        const droneIcon2 = L.icon({
+            iconUrl: 'static/D2.png',
+            iconSize: [40, 40],
+            iconAnchor: [20, 20]
+        });
+        let droneMarkers = {1: null, 2: null};
         let dronePath = [];
         let dronePolyline = null;
         let missionPolyline = null;
@@ -132,7 +138,6 @@
         let currentPolygon = null;
         let currentGeofence = null;
         let currentGrid = null;
-        let droneMarkers = {1: null, 2: null};
         let gridPath = null;
         let geofencePath = null;
         let lastPersonDetected = false;
@@ -163,9 +168,13 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
                 map.removeLayer(missionPolyline);
                 missionPolyline = null;
             }
-            if (droneMarker) {
-                map.removeLayer(droneMarker);
-                droneMarker = null;
+            if (droneMarkers[1]) {
+                map.removeLayer(droneMarkers[1]);
+                droneMarkers[1] = null;
+            }
+            if (droneMarkers[2]) {
+                map.removeLayer(droneMarkers[2]);
+                droneMarkers[2] = null;
             }
             dronePath = [];
             if (window.gridMarkers) {
@@ -234,9 +243,13 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
                 map.removeLayer(missionPolyline);
                 missionPolyline = null;
             }
-            if (droneMarker) {
-                map.removeLayer(droneMarker);
-                droneMarker = null;
+            if (droneMarkers[1]) {
+                map.removeLayer(droneMarkers[1]);
+                droneMarkers[1] = null;
+            }
+            if (droneMarkers[2]) {
+                map.removeLayer(droneMarkers[2]);
+                droneMarkers[2] = null;
             }
             dronePath = [];
             if (window.gridMarkers) {
@@ -384,11 +397,14 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
         async function startMission(droneId) {
             showLoading();
             try {
-                // Use current grid from backend (no need to send grid from frontend)
+                // Send the current grid as shown in the UI
                 const response = await fetch('/start-mission', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({drone_id: droneId})
+                    body: JSON.stringify({
+                        drone_id: droneId,
+                        grid: gridPath ? gridPath.getLatLngs().map(pt => [pt.lat, pt.lng]) : []
+                    })
                 });
                 const result = await response.json();
                 if (result.success) {
@@ -399,7 +415,7 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
             } catch (error) {
                 showStatus('Start mission failed: ' + error.message, 'error');
             } finally {
-            hideLoading();
+                hideLoading();
             }
         }
 
@@ -415,6 +431,17 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
                         document.getElementById(`drone${i}Armed`).textContent = status.armed !== undefined ? status.armed : '--';
                         document.getElementById(`drone${i}Battery`).textContent = status.battery !== undefined ? status.battery : '--';
                         document.getElementById(`drone${i}StatusAltitude`).textContent = status.altitude !== undefined ? status.altitude : '--';
+
+                        // Show drone marker on map if position available
+                        if (status.latitude && status.longitude) {
+                            const latlng = [status.latitude, status.longitude];
+                            const icon = i === 1 ? droneIcon1 : droneIcon2;
+                            if (!droneMarkers[i]) {
+                                droneMarkers[i] = L.marker(latlng, {icon}).addTo(map);
+                            } else {
+                                droneMarkers[i].setLatLng(latlng);
+                            }
+                        }
                     }
                 }
                 // Update person detection status
@@ -426,10 +453,10 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
                 if (drone1 && drone1.latitude && drone1.longitude) {
                     const latlng = [drone1.latitude, drone1.longitude];
                     // Update marker
-                    if (!droneMarker) {
-                        droneMarker = L.marker(latlng, {icon: droneIcon}).addTo(map);
+                    if (!droneMarkers[1]) {
+                        droneMarkers[1] = L.marker(latlng, {icon: droneIcon1}).addTo(map);
                     } else {
-                        droneMarker.setLatLng(latlng);
+                        droneMarkers[1].setLatLng(latlng);
                     }
                     // Always draw the drone path regardless of polygon presence
                     dronePath.push(latlng);
@@ -451,15 +478,15 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
             const response = await fetch('/person-locations');
             const locations = await response.json();
             locations.forEach(loc => {
-                const marker = L.marker([loc.lat, loc.lon], {
+                const marker = L.marker([parseFloat(loc.latitude), parseFloat(loc.longitude)], {
                     icon: L.icon({
-                        iconUrl: 'static/person.png', // Place a person.png icon in your static folder
+                        iconUrl: 'static/person.png',
                         iconSize: [32, 32],
                         iconAnchor: [16, 32]
                     })
                 }).addTo(map);
                 marker.bindTooltip(
-                    `Person ${loc.person}: ${loc.lat.toFixed(6)}, ${loc.lon.toFixed(6)}`,
+                    `${loc.id}: ${parseFloat(loc.latitude).toFixed(6)}, ${parseFloat(loc.longitude).toFixed(6)}`,
                     {permanent: false, direction: 'top'}
                 );
                 personMarkers.push(marker);
@@ -470,6 +497,19 @@ const GEOFENCE_FILL_COLOR = getComputedStyle(document.documentElement).getProper
         loadPersonLocations();
         // Optional: refresh every 5 seconds
         setInterval(loadPersonLocations, 5000);
+
+        // Assume `grid` is your array of [lat, lon] waypoints from the backend
+var latlngs = grid.map(function(pt) { return [pt[0], pt[1]]; });
+var polyline = L.polyline(latlngs, {color: 'yellow', weight: 3}).addTo(map);
+var decorator = L.polylineDecorator(polyline, {
+  patterns: [
+    {
+      offset: 25, // distance in pixels or percentage
+      repeat: 50,
+      symbol: L.Symbol.arrowHead({pixelSize: 12, polygon: false, pathOptions: {stroke: true, color: 'red'}})
+    }
+  ]
+}).addTo(map);
     </script>
 
 </body>
