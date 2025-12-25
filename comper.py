@@ -290,9 +290,9 @@ def start_drone2_mission():
                         # Activate servo to drop rescue kit
                         print("Activating rescue mechanism")
                         activate_servo(vehicle, 
-                                    channel=SERVO_CONFIG['channel'],
-                                    pwm_value=SERVO_CONFIG['pwm_value'],
-                                    delay=SERVO_CONFIG['delay'])
+                                    drone_id=1,
+                                    pwm_value=SERVO_CONFIG[1]['pwm_value'],
+                                    delay=SERVO_CONFIG[1]['delay'])
                         
                         # Return to default altitude
                         print(f"Returning to default altitude: {config['default_altitude']}m")
@@ -313,141 +313,195 @@ def start_drone2_mission():
                     else:
                         time.sleep(2)
     except Exception as e:
-        print(f"Drone 2 mission error: {e}")
+        print(f"Error in Drone 2 mission: {e}")
+        if 'vehicle' in locals() and vehicle is not None:
+            vehicle.mode = VehicleMode("RTL")
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+# VisDrone-specific configuration
+VISDRONE_HUMAN_CLASSES = [0, 1]  # 0=pedestrian, 1=people
+CONF_TH = 0.35                    # tuned for 50m no-zoom flight
+MIN_BBOX_AREA = 400               # reject far / noise detections
+HUMAN_FRAME_THRESHOLD = 3         # require 3 consecutive detections
+human_frame_count = 0             # track consecutive detections
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = YOLO("yolov8n.pt").to(device)
-    cap = None
-    frame = None
-    lock = threading.Lock()
-    video_thread_started = False
+model = YOLO("best.pt").to(device)  # Using custom trained VisDrone model
+cap = None
+frame = None
+lock = threading.Lock()
+video_thread_started = False
 
-    def capture_frames():
-        global frame, cap
-        while True:
-            if cap is not None:
-                ret, temp_frame = cap.read()
-                if ret:
-                    with lock:
-                        frame = temp_frame
-
-    @app.route('/video_feed')
-    def video_feed():
-        global cap, video_thread_started
-        if cap is None:
-            #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
-            cap = cv2.VideoCapture(0)
-            # Optionally set resolution if supported by the RTSP stream
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-        if not video_thread_started:
-            threading.Thread(target=capture_frames, daemon=True).start()
-            video_thread_started = True
-
-        def gen_frames():
-            while True:
+def capture_frames():
+    global frame, cap
+    while True:
+        if cap is not None:
+            ret, temp_frame = cap.read()
+            if ret:
                 with lock:
-                    if frame is None:
-                        blank = np.zeros((240, 320, 3), dtype=np.uint8)
-                        ret, buffer = cv2.imencode('.jpg', blank)
-                        frame_bytes = buffer.tobytes()
-                        yield (b'--frame\r\n'
-                            b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                        continue
-                    img = frame.copy()
-                results = model(img, imgsz=256, verbose=False)
-                for result in results:
-                    for box in result.boxes:
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        cv2.rectangle(img, (x1, y1), (x2, y2), (0,255,0), 2)
-                        cv2.putText(img, "Person", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
-                ret, buffer = cv2.imencode('.jpg', img)
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+                    frame = temp_frame
 
-    # Drone state
-    drones = {1: {"vehicle": None, "connected": False, "status": {}, "mission_active": False, "geofence_monitoring": False},
+@app.route('/video_feed')
+def video_feed():
+    global cap, video_thread_started
+    if cap is None:
+        #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
+        cap = cv2.VideoCapture(0)
+        # Optionally set resolution if supported by the RTSP stream
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+    if not video_thread_started:
+        threading.Thread(target=capture_frames, daemon=True).start()
+        video_thread_started = True
+
+    def gen_frames():
+        while True:
+            with lock:
+                if frame is None:
+                    blank = np.zeros((240, 320, 3), dtype=np.uint8)
+                    ret, buffer = cv2.imencode('.jpg', blank)
+                    frame_bytes = buffer.tobytes()
+                    yield (b'--frame\r\n'
+                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    continue
+                img = frame.copy()
+            results = model(img, imgsz=416, conf=CONF_TH, iou=0.45, classes=VISDRONE_HUMAN_CLASSES, verbose=False)
+            for result in results:
+                for box in result.boxes:
+                    cls_id = int(box.cls[0])
+                    conf = float(box.conf[0])
+
+                    if cls_id not in VISDRONE_HUMAN_CLASSES or conf < CONF_TH:
+                        continue
+
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    area = (x2 - x1) * (y2 - y1)
+                    if area < MIN_BBOX_AREA:
+                        continue
+
+                    label = f"Human {conf:.2f}"
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(img, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            ret, buffer = cv2.imencode('.jpg', img)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# Drone state
+drones = {1: {"vehicle": None, "connected": False, "status": {}, "mission_active": False, "geofence_monitoring": False},
             2: {"vehicle": None, "connected": False, "status": {}, "mission_active": False, "geofence_monitoring": False}}
 
-    # Mission state
-    polygon_coords = None
-    polygon = None
-    expanded_polygon = None
-    grid_waypoints = []
-    home_position = None
+# Mission state
+polygon_coords = None
+polygon = None
+expanded_polygon = None
+grid_waypoints = []
+home_position = None
 
-    def meters_to_degrees(meters, latitude):
-        return meters / (111320 * np.cos(np.radians(latitude)))
+def meters_to_degrees(meters, latitude):
+    return meters / (111320 * np.cos(np.radians(latitude)))
 
-    # Send NED velocity function (from d.py)
-    def send_ned_velocity(vehicle, velocity_x, velocity_y, velocity_z, duration):
-        rate_hz = 10  # 10 commands per second
-        rate_sleep = 1.0 / rate_hz
-        total_iterations = int(duration * rate_hz)
-        for _ in range(total_iterations):
-            msg = vehicle.message_factory.set_position_target_local_ned_encode(
-                0, 0, 0,  # time_boot_ms, target_system, target_component
-                mavutil.mavlink.MAV_FRAME_LOCAL_NED,  # Frame of reference
-                0b0000111111000111,  # Type mask (only velocity enabled)
-                0, 0, 0,  # x, y, z positions (not used)
-                velocity_x, velocity_y, velocity_z,  # x, y, z velocity (m/s)
-                0, 0, 0,  # x, y, z acceleration (not used)
-                0, 0  # yaw, yaw rate (not used)
-            )
-            vehicle.send_mavlink(msg)
-            vehicle.flush()
-            time.sleep(rate_sleep)
+# Send NED velocity function (from d.py)
+def send_ned_velocity(vehicle, velocity_x, velocity_y, velocity_z, duration):
+    rate_hz = 10  # 10 commands per second
+    rate_sleep = 1.0 / rate_hz
+    total_iterations = int(duration * rate_hz)
+    for _ in range(total_iterations):
+        msg = vehicle.message_factory.set_position_target_local_ned_encode(
+            0, 0, 0,  # time_boot_ms, target_system, target_component
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,  # Frame of reference
+            0b0000111111000111,  # Type mask (only velocity enabled)
+            0, 0, 0,  # x, y, z positions (not used)
+            velocity_x, velocity_y, velocity_z,  # x, y, z velocity (m/s)
+            0, 0, 0,  # x, y, z acceleration (not used)
+            0, 0  # yaw, yaw rate (not used)
+        )
+        vehicle.send_mavlink(msg)
+        vehicle.flush()
+        time.sleep(rate_sleep)
 
-    # Geofence monitoring function (from d.py)
-    def detect_person():
-        with lock:
-            if frame is None:
-                return False
-            img = frame.copy()
-        results = model(img, imgsz=256, verbose=False)
-        for result in results:
-            for box in result.boxes:
-                if int(box.cls[0]) == 0:  # 0 is "person" in COCO
-                    return True
-        return False
+# Geofence monitoring function (from d.py)
+def detect_person():
+    global human_frame_count
+    with lock:
+        if frame is None:
+            human_frame_count = 0
+            return False
+        img = frame.copy()
 
-    def monitor_geofence(drone_id):
-        global polygon, expanded_polygon, person_detected_drone1
-        vehicle = drones[drone_id]["vehicle"]
-        inside_polygon = False
+    # If vehicle is moving fast, add a small delay to reduce motion blur triggers
+    if 'vehicle' in drones[1] and drones[1]['vehicle'] is not None:
+        vehicle = drones[1]['vehicle']
+        if hasattr(vehicle, 'groundspeed') and vehicle.groundspeed > 6:
+            time.sleep(0.2)
 
-        while drones[drone_id]["geofence_monitoring"]:
-            if not vehicle or not vehicle.location:
-                time.sleep(1)
-                continue
+    results = model(img, imgsz=416, conf=CONF_TH, iou=0.45, classes=VISDRONE_HUMAN_CLASSES, verbose=False)
 
-            location = vehicle.location.global_relative_frame
-            drone_point = Point(location.lon, location.lat)
+    detected = False
+    for result in results:
+        for box in result.boxes:
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
 
-            if not inside_polygon and polygon and polygon.contains(drone_point):
-                inside_polygon = True
-                print(f"Drone {drone_id} entered original polygon. Geofence monitoring activated!")
-
-            if inside_polygon and expanded_polygon:
-                if not expanded_polygon.contains(drone_point):
-                    print(f"Drone {drone_id}: Geofence breach detected! Triggering RTL...")
-                    vehicle.mode = VehicleMode("RTL")
-                    drones[drone_id]["geofence_monitoring"] = False
+            if cls_id in VISDRONE_HUMAN_CLASSES and conf >= CONF_TH:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                area = (x2 - x1) * (y2 - y1)
+                if area >= MIN_BBOX_AREA:
+                    detected = True
                     break
 
-                # Only for Drone 1: Person detection (disabled after assigned waypoints completed)
-                if drone_id == 1 and (not drone1_waypoints_completed) and detect_person():
-                    person_detected_drone1 = True
-                    print(f"Drone {drone_id}: Person Detected! Hovering for 10 seconds.")
-                    vehicle.mode = VehicleMode("GUIDED")
-                    while vehicle.mode.name != "GUIDED":
-                        time.sleep(0.5)
-                    send_ned_velocity(vehicle, 0, 0, 0, 10)
-                    location = vehicle.location.global_frame
-                    if location:
+    # Update frame counter
+    if detected:
+        human_frame_count += 1
+    else:
+        human_frame_count = 0
+
+    # Only return True if we have enough consecutive detections
+    return human_frame_count >= HUMAN_FRAME_THRESHOLD
+
+def monitor_geofence(drone_id):
+    global polygon, expanded_polygon, person_detected_drone1
+    vehicle = drones[drone_id]["vehicle"]
+    inside_polygon = False
+
+    while drones[drone_id]["geofence_monitoring"]:
+        if not vehicle or not vehicle.location:
+            time.sleep(1)
+            continue
+
+        location = vehicle.location.global_relative_frame
+        drone_point = Point(location.lon, location.lat)
+
+        if not inside_polygon and polygon and polygon.contains(drone_point):
+            inside_polygon = True
+            print(f"Drone {drone_id} entered original polygon. Geofence monitoring activated!")
+
+        if inside_polygon and expanded_polygon:
+            if not expanded_polygon.contains(drone_point):
+                print(f"Drone {drone_id}: Geofence breach detected! Triggering RTL...")
+                vehicle.mode = VehicleMode("RTL")
+                drones[drone_id]["geofence_monitoring"] = False
+                break
+
+            # Only for Drone 1: Person detection (disabled after assigned waypoints completed)
+            if drone_id == 1 and (not drone1_waypoints_completed) and detect_person():
+                person_detected_drone1 = True
+                print(f"Drone {drone_id}: Human detected with high confidence! Hovering for 10 seconds.")
+                
+                # Only log and trigger actions if we have a valid location
+                location = vehicle.location.global_frame
+                if location:
+                    # Only log if we haven't already logged this detection
+                    should_log = True
+                    if os.path.exists("drone_logs.csv"):
+                        with open("drone_logs.csv", "r") as csvfile:
+                            reader = csv.reader(csvfile)
+                            for row in reader:
+                                if row and len(row) > 3 and abs(float(row[1]) - location.lat) < 0.0001 and abs(float(row[2]) - location.lon) < 0.0001:
+                                    should_log = False
+                                    break
+                        
+                    if should_log:
                         with open("drone_logs.csv", "a", newline="") as csvfile:
                             writer = csv.writer(csvfile)
                             writer.writerow([
@@ -459,27 +513,39 @@ def start_drone2_mission():
                             ])
                         log_person_detection(location.lat, location.lon, location.alt)
                         print(f"Drone {drone_id} location sent to CSV!")
-                    # Activate servo sequence during person detection event
-                    activate_servo(
-                        vehicle,
-                        drone_id=drone_id,
-                        pwm_value=SERVO_CONFIG[drone_id]['pwm_value'],
-                        delay=SERVO_CONFIG[drone_id]['delay']
-                    )
+                        
+                        # Only activate servo if this is a new detection
+                        activate_servo(
+                            vehicle,
+                            drone_id=drone_id,
+                            pwm_value=SERVO_CONFIG[drone_id]['pwm_value'],
+                            delay=SERVO_CONFIG[drone_id]['delay']
+                        )
+                
+                # Hover for 10 seconds
+                current_mode = vehicle.mode
+                vehicle.mode = VehicleMode("GUIDED")
+                while vehicle.mode.name != "GUIDED":
+                    time.sleep(0.5)
+                send_ned_velocity(vehicle, 0, 0, 0, 10)
+                
+                # Return to previous mode if it was AUTO
+                if current_mode.name == "AUTO":
                     vehicle.mode = VehicleMode("AUTO")
-                    # Reset flag after a short delay so UI can see "Yes"
-                    time.sleep(2)
-                    person_detected_drone1 = False  # <--- Reset flag
-            time.sleep(1)
+                    
+                # Reset flag after a short delay so UI can see "Yes"
+                time.sleep(2)
+                person_detected_drone1 = False
+        time.sleep(1)
 
-    # --- Add at the top, after your imports ---
-    DRONE2_PERSON_LIMIT = 5  # Start Drone 2 when 5 persons detected
-    drone2_mission_started = False
-    drone1_rtl_triggered = False
-    drone1_mission_completed = False
-    drone1_waypoints_completed = False
+# --- Add at the top, after your imports ---
+DRONE2_PERSON_LIMIT = 5  # Start Drone 2 when 5 persons detected
+drone2_mission_started = False
+drone1_rtl_triggered = False
+drone1_mission_completed = False
+drone1_waypoints_completed = False
 
-    def monitor_person_detection_and_start_drone2():
+def monitor_person_detection_and_start_drone2():
         global drone2_mission_started
         while True:
             try:
@@ -500,9 +566,9 @@ def start_drone2_mission():
                 print(f"Error in monitor_person_detection_and_start_drone2: {e}")
             time.sleep(5)  # Check every 5 seconds
 
-    # API Endpoints
-    @app.route('/upload-kml', methods=['POST'])
-    def upload_kml():
+# API Endpoints
+@app.route('/upload-kml', methods=['POST'])
+def upload_kml():
         global polygon_coords, polygon, expanded_polygon
         if 'file' not in request.files:
             return jsonify({"success": False, "error": "No file uploaded"}), 400
@@ -546,8 +612,8 @@ def start_drone2_mission():
         except Exception as e:
             return jsonify({"success": False, "error": f"Failed to parse KML: {str(e)}"}), 500
 
-    @app.route('/generate-grid', methods=['POST'])
-    def generate_grid():
+@app.route('/generate-grid', methods=['POST'])
+def generate_grid():
         global grid_waypoints, home_position, polygon, polygon_coords
         if polygon is None or polygon_coords is None:
             return jsonify({"success": False, "error": "No KML uploaded"}), 400
@@ -663,8 +729,8 @@ def start_drone2_mission():
             traceback.print_exc()
             return jsonify({"success": False, "error": f"Error generating grid: {str(e)}"}), 500
 
-    @app.route('/start-mission', methods=['POST'])
-    def start_mission():
+@app.route('/start-mission', methods=['POST'])
+def start_mission():
         drone_id = 1
         # Only allow mission start if drone is connected and not armed
         if not drones[drone_id]["connected"]:
@@ -679,7 +745,7 @@ def start_drone2_mission():
         drone1_thread.start()
         return jsonify({"success": True, "message": "Drone 1 mission started"})
 
-    def start_drone1_mission(grid=None):
+def start_drone1_mission(grid=None):
         global home_position, grid_waypoints, cap, drone1_waypoints_completed, drone1_mission_completed, drone2_mission_started
         drone_id = 1
         
@@ -799,8 +865,8 @@ def start_drone2_mission():
         except Exception as e:
             print(f"Drone 1 mission error: {e}")
 
-    @app.route('/connect-drone', methods=['POST'])
-    def connect_drone():
+@app.route('/connect-drone', methods=['POST'])
+def connect_drone():
         global home_position
         data = request.json
         drone_id = data.get('drone_id')
@@ -830,8 +896,8 @@ def start_drone2_mission():
         except Exception as e:
             return jsonify({"success": False, "error": f"Failed to connect: {str(e)}"}), 500
 
-    @app.route('/disconnect-drone', methods=['POST'])
-    def disconnect_drone():
+@app.route('/disconnect-drone', methods=['POST'])
+def disconnect_drone():
         data = request.json
         drone_id = data.get('drone_id')
         
@@ -848,8 +914,8 @@ def start_drone2_mission():
         
         return jsonify({"success": True, "message": f"Drone {drone_id} disconnected"})
 
-    @app.route('/set-altitude', methods=['POST'])
-    def set_altitude():
+@app.route('/set-altitude', methods=['POST'])
+def set_altitude():
         data = request.json
         drone_id = data.get('drone_id')
         altitude_type = data.get('altitude_type', 'default')  # 'default', 'lowered', or 'rtl'
@@ -872,8 +938,8 @@ def start_drone2_mission():
             "new_altitude": data.get('altitude')
         })
 
-    @app.route('/set-speed', methods=['POST'])
-    def set_speed():
+@app.route('/set-speed', methods=['POST'])
+def set_speed():
         data = request.json
         drone_id = data.get('drone_id')
         speed = data.get('speed', DRONE_CONFIG[drone_id]['default_speed'])
@@ -893,8 +959,8 @@ def start_drone2_mission():
             "new_speed": speed
         })
 
-    @app.route('/trigger-rtl', methods=['POST'])
-    def trigger_rtl():
+@app.route('/trigger-rtl', methods=['POST'])
+def trigger_rtl():
         global drone1_rtl_triggered
         data = request.json
         drone_id = data.get('drone_id')
@@ -913,8 +979,8 @@ def start_drone2_mission():
         except Exception as e:
             return jsonify({"success": False, "error": f"Failed to trigger RTL: {str(e)}"}), 500
 
-    @app.route('/drone-status', methods=['GET'])
-    def drone_status():
+@app.route('/drone-status', methods=['GET'])
+def drone_status():
         # Always fetch live status from vehicle if connected
         drones_status = {}
         for drone_id in drones:
@@ -941,8 +1007,8 @@ def start_drone2_mission():
             "person_detected": person_detected_drone1
         })
 
-    @app.route('/person-detected', methods=['POST'])
-    def person_detected():
+@app.route('/person-detected', methods=['POST'])
+def person_detected():
         drone_id = 1  # Always use Drone 1 for person detection
         if not drones[drone_id]["connected"]:
             return jsonify({"success": False, "error": "Drone not connected"}), 400
@@ -955,10 +1021,12 @@ def start_drone2_mission():
                 time.sleep(0.5)
             send_ned_velocity(vehicle, 0, 0, 0, 10)
             print("Activating rescue mechanism Drone 1")
-            activate_servo(vehicle, 
-                                                            channel=SERVO_CONFIG[6],
-                                                            pwm_value=SERVO_CONFIG['pwm_value'],
-                                                            delay=SERVO_CONFIG['delay'])
+            activate_servo(
+                vehicle,
+                drone_id=1,
+                pwm_value=SERVO_CONFIG[1]['pwm_value'],
+                delay=SERVO_CONFIG[1]['delay']
+            )
             # Log to CSV file
             location = vehicle.location.global_frame
             if location:
@@ -983,14 +1051,14 @@ def start_drone2_mission():
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
 
-    person_detected_drone1 = False
+person_detected_drone1 = False
 
-    @app.route('/')
-    def index():
-        return render_template('index.html')
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-    @app.route('/person-locations', methods=['GET'])
-    def person_locations():
+@app.route('/person-locations', methods=['GET'])
+def person_locations():
         locations = []
         if os.path.exists(DRONE_LOGS_FILE):
             with open(DRONE_LOGS_FILE, newline='') as csvfile:
@@ -1006,7 +1074,7 @@ def start_drone2_mission():
                         })
         return jsonify(locations)
 
-    def log_person_detection(lat, lon, alt, drone_id=1):
+def log_person_detection(lat, lon, alt, drone_id=1):
         with log_file_lock:
             last_entry = None
             if os.path.exists(DRONE_LOGS_FILE):
@@ -1029,9 +1097,9 @@ def start_drone2_mission():
             else:
                 print("Duplicate detection, not logging.")
 
-    log_file_lock = threading.Lock()
+log_file_lock = threading.Lock()
 
-    def monitor_drone1_mission_completion(vehicle, mission_length):
+def monitor_drone1_mission_completion(vehicle, mission_length):
         global drone1_mission_completed, drone1_waypoints_completed
         while True:
             try:
@@ -1051,7 +1119,7 @@ def start_drone2_mission():
                 break  # Exit the loop on error (e.g., timeout)
             time.sleep(2)
 
-    def reorder_polygon_vertices(polygon_coords, home_location):
+def reorder_polygon_vertices(polygon_coords, home_location):
         """
         polygon_coords: list/array of (lat, lon)
         home_location: (lat, lon)
@@ -1068,8 +1136,8 @@ def start_drone2_mission():
             reordered.append(reordered[0])
         return reordered
 
-    @app.route('/set-home', methods=['POST'])
-    def set_home():
+@app.route('/set-home', methods=['POST'])
+def set_home():
         global home_position
         data = request.get_json(silent=True) or {}
         try:
@@ -1080,6 +1148,6 @@ def start_drone2_mission():
         except Exception:
             return jsonify({"success": False, "error": "Provide lat and lon (numbers)"}), 400
 
-    if __name__ == '__main__':
-        threading.Thread(target=monitor_person_detection_and_start_drone2, daemon=True).start()
-        app.run(debug=True, host='0.0.0.0', port=5000)
+if __name__ == '__main__':
+    threading.Thread(target=monitor_person_detection_and_start_drone2, daemon=True).start()
+    app.run(debug=True, host='0.0.0.0', port=5000)
