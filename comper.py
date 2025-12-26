@@ -14,11 +14,13 @@ from shapely.geometry import Polygon, Point, LineString
 from dronekit import connect, VehicleMode, LocationGlobalRelative, Command
 from pymavlink import mavutil
 import csv
-
+import json
+import cv2
+from datetime import datetime
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend communication
-
 
 # --- Drone 2 Kit Drop Logic (CSV-based, with visited logging) ---
 import math
@@ -65,6 +67,7 @@ MISSION_CONFIG = {
         'approach_speed': 2.0,       # m/s speed when approaching waypoints
         'cruise_speed': 5.0          # m/s normal cruising speed
     }
+
 def arm_and_takeoff(vehicle, target_altitude):
         while not vehicle.is_armable:
             time.sleep(1)
@@ -322,10 +325,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 VISDRONE_HUMAN_CLASSES = [0, 1]  # 0=pedestrian, 1=people
 CONF_TH = 0.35                    # tuned for 50m no-zoom flight
 MIN_BBOX_AREA = 400               # reject far / noise detections
-HUMAN_FRAME_THRESHOLD = 3         # require 3 consecutive detections
+HUMAN_FRAME_THRESHOLD = 1         # require 3 consecutive detections
 human_frame_count = 0             # track consecutive detections
 
-model = YOLO("best.pt").to(device)  # Using custom trained VisDrone model
+model = YOLO("yolov8n.pt").to(device)  # Using custom trained VisDrone model
 cap = None
 frame = None
 lock = threading.Lock()
@@ -1008,50 +1011,129 @@ def drone_status():
         })
 
 @app.route('/person-detected', methods=['POST'])
+def capture_frames_for_detection(detection_id, duration=10, interval=0.5):
+    """Capture frames during hover period for person detection.
+    
+    Args:
+        detection_id: Unique ID for this detection instance
+        duration: Total duration to capture frames (seconds)
+        interval: Time between frame captures (seconds)
+    """
+    global frame
+    frames_dir = f"person{detection_id}"
+    os.makedirs(frames_dir, exist_ok=True)
+    
+    frames_captured = 0
+    start_time = time.time()
+    
+    while (time.time() - start_time) < duration:
+        with lock:
+            if frame is not None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                frame_path = os.path.join(frames_dir, f"person{detection_id}_{frames_captured + 1}.jpg")
+                cv2.imwrite(frame_path, frame)
+                frames_captured += 1
+                
+                # Create JSON metadata for this frame
+                metadata = {
+                    "drone": {
+                        "latitude": vehicle.location.global_frame.lat,
+                        "longitude": vehicle.location.global_frame.lon,
+                        "altitude_m": vehicle.location.global_frame.alt,
+                        "bearing_angle_deg": vehicle.heading if hasattr(vehicle, 'heading') else 0.0
+                    },
+                    "image": {
+                        "path": frame_path,
+                        "timestamp": timestamp
+                    }
+                }
+                
+                json_path = os.path.join(frames_dir, f"metadata_{detection_id}_{frames_captured}.json")
+                with open(json_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+        
+        time.sleep(interval)
+    
+    return frames_captured
+
 def person_detected():
-        drone_id = 1  # Always use Drone 1 for person detection
-        if not drones[drone_id]["connected"]:
-            return jsonify({"success": False, "error": "Drone not connected"}), 400
-        try:
-            vehicle = drones[drone_id]["vehicle"]
-            # Hover for 10 seconds
-            print("Person Detected! Hovering for 10 seconds.")
-            vehicle.mode = VehicleMode("GUIDED")
-            while vehicle.mode.name != "GUIDED":
-                time.sleep(0.5)
-            send_ned_velocity(vehicle, 0, 0, 0, 10)
-            print("Activating rescue mechanism Drone 1")
-            activate_servo(
-                vehicle,
-                drone_id=1,
-                pwm_value=SERVO_CONFIG[1]['pwm_value'],
-                delay=SERVO_CONFIG[1]['delay']
-            )
-            # Log to CSV file
-            location = vehicle.location.global_frame
-            if location:
-                with open("drone_logs.csv", "a", newline="") as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow([
-                        f"Person Detected - Drone 1",
-                        location.lat,
-                        location.lon,
-                        location.alt,
-                        time.strftime("%Y-%m-%d %H:%M:%S")
-                    ])
-                log_person_detection(location.lat, location.lon, location.alt)
-                print(f"Drone {drone_id} location sent to CSV!")
-            # Resume mission
-            vehicle.mode = VehicleMode("AUTO")
-            return jsonify({
-                "success": True,
-                "message": "Person detected action completed",
-                "ui_comment": "Person Detected! Hovering for 10 seconds. Location sent to CSV!"
-            })
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)}), 500
+    global person_detection_counter
+    drone_id = 1  # Always use Drone 1 for person detection
+    
+    if not drones[drone_id]["connected"]:
+        return jsonify({"success": False, "error": "Drone not connected"}), 400
+    
+    try:
+        vehicle = drones[drone_id]["vehicle"]
+        
+        # Get current position for logging
+        location = vehicle.location.global_frame
+        if not location:
+            return jsonify({"success": False, "error": "Could not get current location"}), 400
+        
+        # Increment detection counter for this session
+        person_detection_counter += 1
+        detection_id = person_detection_counter
+        
+        print(f"Person {detection_id} Detected! Hovering for 10 seconds.")
+        
+        # Switch to GUIDED mode and hover
+        vehicle.mode = VehicleMode("GUIDED")
+        while vehicle.mode.name != "GUIDED":
+            time.sleep(0.5)
+        
+        # Start frame capture in a separate thread
+        capture_thread = threading.Thread(
+            target=capture_frames_for_detection,
+            args=(detection_id, 10, 1)  # 10 seconds, 1 frame per second
+        )
+        capture_thread.daemon = True
+        capture_thread.start()
+        
+        # Hover for 10 seconds
+        send_ned_velocity(vehicle, 0, 0, 0, 10)
+        
+        # After 3 seconds, activate servo
+        time.sleep(3)
+        print(f"Activating rescue mechanism for person {detection_id}")
+        activate_servo(
+            vehicle,
+            drone_id=1,
+            pwm_value=SERVO_CONFIG[1]['pwm_value'],
+            delay=SERVO_CONFIG[1]['delay']
+        )
+        
+        # Log to CSV file
+        with open("drone_logs.csv", "a", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([
+                f"Person {detection_id} Detected - Drone 1",
+                location.lat,
+                location.lon,
+                location.alt,
+                time.strftime("%Y-%m-%d %H:%M:%S")
+            ])
+        
+        log_person_detection(location.lat, location.lon, location.alt)
+        print(f"Person {detection_id} detection logged to CSV!")
+        
+        # Wait for frame capture to complete
+        capture_thread.join(timeout=5)
+        
+        # Resume mission
+        vehicle.mode = VehicleMode("AUTO")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Person {detection_id} detected action completed",
+            "detection_id": detection_id,
+            "ui_comment": f"Person {detection_id} Detected! Hovering for 10 seconds. Location and images saved!"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 person_detected_drone1 = False
+person_detection_counter = 0
 
 @app.route('/')
 def index():

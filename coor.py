@@ -2,97 +2,145 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import math
+import json
+import csv
 
-# ===================== Drone & Camera Parameters =====================
-lat_home = 16.4643218
-lon_home = 80.5079891
-altitude = 50  # meters
-img = cv2.imread("admin.jpg")
-model = YOLO("best.pt")
+# ===================== LOAD INPUT JSON AND IMAGE PATHS FROM ARGS =====================
+import sys
+if len(sys.argv) != 3:
+    print("Usage: python coor.py <image_path> <json_path>")
+    sys.exit(1)
+image_path = sys.argv[1]
+json_path = sys.argv[2]
 
-# Camera intrinsic matrix
+with open(json_path, "r") as f:
+    cfg = json.load(f)
+
+drone = cfg["drone"]
+LAT_DRONE = drone["latitude"]
+LON_DRONE = drone["longitude"]
+ALTITUDE = drone["altitude_m"]
+BEARING_DRONE_DEG = drone.get("bearing_angle_deg", 0.0)
+BEARING_DRONE_RAD = math.radians(BEARING_DRONE_DEG)
+
+IMAGE_PATH = image_path
+
+# ===================== DEFAULT DETECTION CONFIG =====================
+CONF_TH = 0.35
+MIN_BBOX_AREA = 400
+VISDRONE_HUMAN_CLASSES = [0, 1]
+
+EARTH_RADIUS = 6378137.0
+
+# ===================== LOAD IMAGE & MODEL =====================
+img = cv2.imread(IMAGE_PATH)
+assert img is not None, "❌ Image not found!"
+
+model = YOLO("yolov8n.pt")
+
+img_h, img_w = img.shape[:2]
+
+# ===================== CAMERA INTRINSICS =====================
 K = np.array([
-    [1870.39, 0, 811.36],
-    [0, 1860.41, 521.88],
+    [2127.84, 0, 903.75],
+    [0, 2056.70, 687.20],
     [0, 0, 1]
 ])
-cx, cy = K[0, 2], K[1, 2]
-img_height, img_width = img.shape[:2]
 
-# Camera Field of View (approx from intrinsics)
-HFOV = 2 * math.degrees(math.atan(img_width / (2 * K[0, 0])))
-VFOV = 2 * math.degrees(math.atan(img_height / (2 * K[1, 1])))
+HFOV = 2 * math.degrees(math.atan(img_w / (2 * K[0, 0])))
+VFOV = 2 * math.degrees(math.atan(img_h / (2 * K[1, 1])))
 
-# Earth radius
-R = 6378137.0
+# ===================== PIXEL → GPS (WITH BEARING) =====================
+def pixel_to_gps(lat, lon, altitude, px, py,
+                 hfov, vfov, img_w, img_h,
+                 drone_bearing_rad):
 
-def get_gps_from_pixel(lat, lon, altitude, bbox_x, bbox_y, HFOV, VFOV, img_w, img_h):
-    cx, cy = img_w / 2.0, img_h / 2.0
-    dx_pix = bbox_x - cx
-    dy_pix = bbox_y - cy
+    dx_pix = px - img_w / 2
+    dy_pix = py - img_h / 2
 
-    ground_width = 2 * altitude * math.tan(math.radians(HFOV) / 2)
-    ground_height = 2 * altitude * math.tan(math.radians(VFOV) / 2)
+    ground_w = 2 * altitude * math.tan(math.radians(hfov / 2))
+    ground_h = 2 * altitude * math.tan(math.radians(vfov / 2))
 
-    gsd_x = ground_width / img_w
-    gsd_y = ground_height / img_h
+    dx_cam = dx_pix * (ground_w / img_w)
+    dy_cam = dy_pix * (ground_h / img_h)
 
-    dx = dx_pix * gsd_x
-    dy = dy_pix * gsd_y
+    # Rotate camera offsets using drone bearing
+    north = -(dy_cam * math.cos(drone_bearing_rad) - dx_cam * math.sin(drone_bearing_rad))
+    east  =  (dy_cam * math.sin(drone_bearing_rad) + dx_cam * math.cos(drone_bearing_rad))
 
-    distance = math.sqrt(dx**2 + dy**2)
-    bearing = (math.atan2(dx, -dy)) % (2 * math.pi)
+    distance = math.sqrt(north**2 + east**2)
+    bearing = math.atan2(east, north) % (2 * math.pi)
 
-    lat1_rad = math.radians(lat)
-    lon1_rad = math.radians(lon)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lon)
 
-    lat2 = math.asin(math.sin(lat1_rad) * math.cos(distance / R) +
-                     math.cos(lat1_rad) * math.sin(distance / R) * math.cos(bearing))
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(distance / EARTH_RADIUS) +
+        math.cos(lat1) * math.sin(distance / EARTH_RADIUS) * math.cos(bearing)
+    )
 
-    lon2 = lon1_rad + math.atan2(math.sin(bearing) * math.sin(distance / R) * math.cos(lat1_rad),
-                                 math.cos(distance / R) - math.sin(lat1_rad) * math.sin(lat2))
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing) * math.sin(distance / EARTH_RADIUS) * math.cos(lat1),
+        math.cos(distance / EARTH_RADIUS) - math.sin(lat1) * math.sin(lat2)
+    )
 
-    return math.degrees(lat2), math.degrees(lon2), distance, math.degrees(bearing)
+    return math.degrees(lat2), math.degrees(lon2)
 
-# ===================== Run YOLO =====================
-results = model(img)
+# ===================== CSV OUTPUT =====================
+import os
+csv_exists = os.path.isfile("dro_person.csv")
+csv_file = open("dro_person.csv", mode="a", newline="")
+csv_writer = csv.writer(csv_file)
+if not csv_exists or os.stat("dro_person.csv").st_size == 0:
+    csv_writer.writerow(["latitude", "longitude"])
+
+saved_points = set()
+
+# ===================== RUN YOLO =====================
+results = model(
+    img,
+    imgsz=416,
+    conf=CONF_TH,
+    classes=VISDRONE_HUMAN_CLASSES,
+    verbose=False
+)
 
 for r in results:
     for box in r.boxes:
-        cls = int(box.cls[0])
-        if cls == 0:  # Person class
-            x1, y1, x2, y2 = box.xyxy[0]
-            u = (x1 + x2) / 2
-            v = (y1 + y2) / 2
+        conf = float(box.conf[0])
+        if conf < CONF_TH:
+            continue
 
-            lat_person, lon_person, dist, bearing = get_gps_from_pixel(
-                lat_home, lon_home, altitude, u, v,
-                HFOV, VFOV, img_width, img_height
-            )
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        area = (x2 - x1) * (y2 - y1)
+        if area < MIN_BBOX_AREA:
+            continue
 
-            print("\n============== DETECTED PERSON ==============")
-            print(f"Pixel Center: ({u:.2f}, {v:.2f})")
-            print(f"Bearing from North: {bearing:.2f}°")
-            print(f"Ground Distance: {dist:.2f} m")
-            print(f"GPS Coordinates: {lat_person:.8f}, {lon_person:.8f}")
-            print("=============================================")
+        u = int((x1 + x2) / 2)
+        v = int((y1 + y2) / 2)
 
-            # === Draw visualization ===
-            cv2.circle(img, (int(u), int(v)), 10, (0, 255, 0), -1)
-            cv2.line(img, (int(cx), int(cy)), (int(u), int(v)), (255, 0, 0), 2)
+        lat_p, lon_p = pixel_to_gps(
+            LAT_DRONE, LON_DRONE, ALTITUDE,
+            u, v,
+            HFOV, VFOV,
+            img_w, img_h,
+            BEARING_DRONE_RAD
+        )
 
-            gps_text = f"Lat:{lat_person:.6f}, Lon:{lon_person:.6f}"
-            cv2.putText(img, gps_text, (int(u)+10, int(v)-20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        key = (round(lat_p, 7), round(lon_p, 7))
+        if key not in saved_points:
+            csv_writer.writerow(key)
+            saved_points.add(key)
 
-            cv2.putText(img, f"{dist:.1f}m | {bearing:.1f}°",
-                        (int(u)+10, int(v)), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 0, 255), 2)
+        # Visualization
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(img, (u, v), 5, (0, 255, 0), -1)
 
-# Draw image center (drone projection)
-cv2.circle(img, (int(cx), int(cy)), 8, (0, 0, 255), -1)
-
+# ===================== CLEANUP =====================
+csv_file.close()
+cv2.imwrite("img_person_geo.jpg", img)
 cv2.imshow("Person GPS Detection", img)
-cv2.imwrite("output_with_gps.jpg", img)
 cv2.waitKey(0)
 cv2.destroyAllWindows()
+
+print("✅ Latitude & Longitude saved to person_coordinates.csv")

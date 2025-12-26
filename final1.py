@@ -35,6 +35,7 @@ import math
 import os
 DRONE_LOGS_FILE = "drone_logs.csv"
 DRONE_VISITED_FILE = "drone_visited.csv"
+PERSON_IMAGE_DIR = "person_images"
 
 # Drone Configuration
 DRONE_CONFIG = {
@@ -60,7 +61,7 @@ SERVO_CONFIG = {
             'delay': 5
         },
     2: {  # Drone 2
-            'channel': 10,
+            'channel': 5,
             'pwm_value': 2000,
             'delay': 5
         }
@@ -116,15 +117,15 @@ def distance_to_target(current_lat, current_lon, target_lat, target_lon):
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return R * c
 def get_gps_from_pixel(lat, lon, altitude, yaw, bbox_x, bbox_y, img_w, img_h):
-    HFOV = 2 * math.degrees(math.atan(img_w / (2 * K[0, 0])))
-    VFOV = 2 * math.degrees(math.atan(img_h / (2 * K[1, 1])))
+    HFOV = 2 * math.atan(img_w / (2 * K[0, 0]))
+    VFOV = 2 * math.atan(img_h / (2 * K[1, 1]))
 
     cx, cy = img_w / 2.0, img_h / 2.0
     dx_pix = bbox_x - cx
     dy_pix = bbox_y - cy
 
-    ground_width = 2 * altitude * math.tan(math.radians(HFOV) / 2)
-    ground_height = 2 * altitude * math.tan(math.radians(VFOV) / 2)
+    ground_width = 2 * altitude * math.tan(HFOV / 2)
+    ground_height = 2 * altitude * math.tan(VFOV / 2)
 
     gsd_x = ground_width / img_w
     gsd_y = ground_height / img_h
@@ -135,7 +136,7 @@ def get_gps_from_pixel(lat, lon, altitude, yaw, bbox_x, bbox_y, img_w, img_h):
     distance = math.sqrt(x_body**2 + y_body**2)
     bearing_rel = math.atan2(y_body, x_body)
 
-    true_bearing = (math.radians(yaw) + bearing_rel) % (2 * math.pi)
+    true_bearing = (yaw + bearing_rel) % (2 * math.pi)
 
     lat1 = math.radians(lat)
     lon1 = math.radians(lon)
@@ -153,29 +154,45 @@ def get_gps_from_pixel(lat, lon, altitude, yaw, bbox_x, bbox_y, img_w, img_h):
     return math.degrees(lat2), math.degrees(lon2)
 
 def calculate_person_gps_from_frame(frame, vehicle):
+    global detected_person, human_frame_count
     img_h, img_w = frame.shape[:2]
 
-    results = model(frame, imgsz=416, verbose=False)
+    results = model(frame, imgsz=416, conf=CONF_TH, iou=0.45, verbose=False)
+
+    detected_this_frame = False
 
     for r in results:
         for box in r.boxes:
             if int(box.cls[0]) == 0:  # Person
                 x1, y1, x2, y2 = box.xyxy[0]
+                area = float((x2 - x1) * (y2 - y1))
+                conf = float(box.conf[0]) if hasattr(box, "conf") else 1.0
+                if conf < CONF_TH or area < MIN_BBOX_AREA:
+                    continue
                 u = float((x1 + x2) / 2)
                 v = float((y1 + y2) / 2)
 
                 lat = vehicle.location.global_relative_frame.lat
                 lon = vehicle.location.global_relative_frame.lon
                 alt = vehicle.location.global_relative_frame.alt
-                yaw = vehicle.attitude.yaw * 180 / math.pi
+                yaw = vehicle.attitude.yaw
 
                 person_lat, person_lon = get_gps_from_pixel(
                     lat, lon, alt, yaw, u, v, img_w, img_h
                 )
 
-                return person_lat, person_lon, alt
+                detected_person = (person_lat, person_lon, alt)
+                detected_this_frame = True
+                break
+        if detected_this_frame:
+            break
 
-    return None
+    if detected_this_frame:
+        human_frame_count += 1
+    else:
+        human_frame_count = 0
+
+    return detected_person, (human_frame_count >= HUMAN_FRAME_THRESHOLD)
 
 def navigate_to(vehicle, lat, lon, altitude=None, is_waypoint=True):
         """Navigate to the given coordinates at the specified or configured altitude.
@@ -389,8 +406,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 VISDRONE_HUMAN_CLASSES = [0, 1]  # 0=pedestrian, 1=people
 CONF_TH = 0.35                    # tuned for 50m no-zoom flight
 MIN_BBOX_AREA = 400               # reject far / noise detections
-HUMAN_FRAME_THRESHOLD = 3         # require 3 consecutive detections
+HUMAN_FRAME_THRESHOLD = 1         # require 3 consecutive detections
 human_frame_count = 0             # track consecutive detections
+detected_person = None
 
 model = YOLO("yolov8n.pt").to(device)  # Using custom trained VisDrone model
 cap = None
@@ -414,40 +432,48 @@ def video_feed():
         #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
         cap = cv2.VideoCapture(0)
         # Optionally set resolution if supported by the RTSP stream
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     if not video_thread_started:
         threading.Thread(target=capture_frames, daemon=True).start()
         video_thread_started = True
 
     def gen_frames():
+        human_frame_count = 0
         while True:
             with lock:
                 if frame is None:
-                    blank = np.zeros((240, 320, 3), dtype=np.uint8)
+                    blank = np.zeros((480, 640, 3), dtype=np.uint8)
                     ret, buffer = cv2.imencode('.jpg', blank)
                     frame_bytes = buffer.tobytes()
                     yield (b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                     continue
                 img = frame.copy()
-            results = model(img, imgsz=416, conf=CONF_TH, iou=0.45, classes=VISDRONE_HUMAN_CLASSES, verbose=False)
+            results = model(img, imgsz=416, conf=CONF_TH, iou=0.45, verbose=False)
+
+
+            detected = False
             for result in results:
                 for box in result.boxes:
                     cls_id = int(box.cls[0])
                     conf = float(box.conf[0])
 
-                    if cls_id not in VISDRONE_HUMAN_CLASSES or conf < CONF_TH:
-                        continue
+                    if cls_id in VISDRONE_HUMAN_CLASSES and conf >= CONF_TH:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        area = (x2 - x1) * (y2 - y1)
+                        if area >= MIN_BBOX_AREA:
+                            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            label = f"Person : {conf:.2f}"
+                            detected = True
+                            break
 
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    area = (x2 - x1) * (y2 - y1)
-                    if area < MIN_BBOX_AREA:
-                        continue
+            # Update frame counter
+            if detected:
+                human_frame_count += 1
+            else:
+                human_frame_count = 0
 
-                    label = f"Human {conf:.2f}"
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(img, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
             ret, buffer = cv2.imencode('.jpg', img)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
@@ -576,9 +602,9 @@ def monitor_geofence(drone_id):
                         continue
                     current_frame = frame.copy()
 
-                person_data = calculate_person_gps_from_frame(current_frame, vehicle)
+                person_data, person_confirmed = calculate_person_gps_from_frame(current_frame, vehicle)
 
-                if person_data:
+                if person_confirmed and person_data:
                     person_lat, person_lon, alt = person_data
 
                     # ----- Duplicate check -----
@@ -593,6 +619,16 @@ def monitor_geofence(drone_id):
 
                     person_detected_drone1 = True
                     print(f"Drone {drone_id}: Person Detected! Hovering.")
+
+                    try:
+                        os.makedirs(PERSON_IMAGE_DIR, exist_ok=True)
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        fname = f"drone{drone_id}_{ts}_lat{person_lat:.6f}_lon{person_lon:.6f}.jpg"
+                        fpath = os.path.join(PERSON_IMAGE_DIR, fname)
+                        cv2.imwrite(fpath, current_frame)
+                        print(f"Saved person image: {fpath}")
+                    except Exception as e:
+                        print(f"Failed to save person image: {e}")
 
                     # Stop drone
                     vehicle.mode = VehicleMode("GUIDED")
@@ -614,6 +650,9 @@ def monitor_geofence(drone_id):
                         ])
 
                     print(f"Person GPS logged: {person_lat}, {person_lon}")
+
+                    detected_person = None
+                    human_frame_count = 0
 
                     # Resume mission
                     vehicle.mode = VehicleMode("AUTO")
@@ -1094,77 +1133,48 @@ def drone_status():
 
 @app.route('/person-detected', methods=['POST'])
 def person_detected():
-    drone_id = 1  # Always use Drone 1 for person detection
-    if not drones[drone_id]["connected"]:
-        return jsonify({"success": False, "error": "Drone not connected"}), 400
-    try:
-        vehicle = drones[drone_id]["vehicle"]
-        # Hover for 10 seconds
-        print("Person Detected! Hovering for 10 seconds.")
-        vehicle.mode = VehicleMode("GUIDED")
-        while vehicle.mode.name != "GUIDED":
-            time.sleep(0.5)
-        send_ned_velocity(vehicle, 0, 0, 0, 10)
-        
-        # Get the current frame
-        with lock:
-            if frame is None:
-                return jsonify({"success": False, "error": "No frame available"}), 400
-            img = frame.copy()
-        
-        # Calculate person's GPS coordinates
-        person_coords = calculate_person_gps_from_frame(img, vehicle)
-        if person_coords:
-            person_lat, person_lon, person_alt = person_coords
-            # Use person's coordinates instead of drone's
-            location = type('Location', (), {
-                'lat': person_lat,
-                'lon': person_lon,
-                'alt': person_alt
-            })
-            print(f"Person GPS: {person_lat}, {person_lon}, {person_alt}")
-        else:
-            # Fallback to drone's location if person coordinates can't be calculated
+        drone_id = 1  # Always use Drone 1 for person detection
+        if not drones[drone_id]["connected"]:
+            return jsonify({"success": False, "error": "Drone not connected"}), 400
+        try:
+            vehicle = drones[drone_id]["vehicle"]
+            # Hover for 10 seconds
+            print("Person Detected! Hovering for 10 seconds.")
+            vehicle.mode = VehicleMode("GUIDED")
+            while vehicle.mode.name != "GUIDED":
+                time.sleep(0.5)
+            send_ned_velocity(vehicle, 0, 0, 0, 10)
+            print("Activating rescue mechanism Drone 1")
+            activate_servo(
+                vehicle,
+                drone_id=1,
+                pwm_value=SERVO_CONFIG[1]['pwm_value'],
+                delay=SERVO_CONFIG[1]['delay']
+            )
+            # Log to CSV file
             location = vehicle.location.global_frame
-            print("Using drone's location as fallback")
-        
-        print("Activating rescue mechanism Drone 1")
-        activate_servo(
-            vehicle,
-            drone_id=1,
-            pwm_value=SERVO_CONFIG[1]['pwm_value'],
-            delay=SERVO_CONFIG[1]['delay']
-        )
-        
-        # Log to CSV file with person's coordinates
-        if location:
-            with open("drone_logs.csv", "a", newline="") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow([
-                    f"Person Detected - Drone 1",
-                    location.lat,
-                    location.lon,
-                    location.alt,
-                    time.strftime("%Y-%m-%d %H:%M:%S")
-                ])
-            log_person_detection(location.lat, location.lon, location.alt)
-            print(f"Person location sent to CSV!")
-        
-        # Resume mission
-        vehicle.mode = VehicleMode("AUTO")
-        return jsonify({
-            "success": True,
-            "message": "Person detected action completed",
-            "ui_comment": "Person Detected! Hovering for 10 seconds. Location sent to CSV!",
-            "person_coords": {
-                "lat": location.lat,
-                "lon": location.lon,
-                "alt": location.alt
-            } if hasattr(location, 'lat') else None
-        })
-    except Exception as e:
-        print(f"Error in person_detected: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+            if location:
+                with open("drone_logs.csv", "a", newline="") as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow([
+                        f"Person Detected - Drone 1",
+                        location.lat,
+                        location.lon,
+                        location.alt,
+                        time.strftime("%Y-%m-%d %H:%M:%S")
+                    ])
+                log_person_detection(location.lat, location.lon, location.alt)
+                print(f"Drone {drone_id} location sent to CSV!")
+            # Resume mission
+            vehicle.mode = VehicleMode("AUTO")
+            return jsonify({
+                "success": True,
+                "message": "Person detected action completed",
+                "ui_comment": "Person Detected! Hovering for 10 seconds. Location sent to CSV!"
+            })
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
 person_detected_drone1 = False
 
 @app.route('/')
