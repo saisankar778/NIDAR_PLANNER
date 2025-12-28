@@ -47,16 +47,28 @@ K = np.array([
     [0, 0, 1]
 ])
 
+D = np.array([-0.0034, 0.0064, 0, 0, 0])
+
 HFOV = 2 * math.degrees(math.atan(img_w / (2 * K[0, 0])))
 VFOV = 2 * math.degrees(math.atan(img_h / (2 * K[1, 1])))
+
+# ===================== UNDISTORTION =====================
+new_K, roi = cv2.getOptimalNewCameraMatrix(K, D, (img_w, img_h), 1, (img_w, img_h))
+map1, map2 = cv2.initUndistortRectifyMap(K, D, None, new_K, (img_w, img_h), cv2.CV_32FC1)
+img_undistorted = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
 
 # ===================== PIXEL → GPS (WITH BEARING) =====================
 def pixel_to_gps(lat, lon, altitude, px, py,
                  hfov, vfov, img_w, img_h,
-                 drone_bearing_rad):
+                 drone_bearing_rad, K):
 
-    dx_pix = px - img_w / 2
-    dy_pix = py - img_h / 2
+    # Undistort pixel coordinates
+    p = np.array([px, py, 1])
+    p_undistorted = np.linalg.inv(K) @ p
+    p_undistorted /= p_undistorted[2]
+
+    dx_pix = p_undistorted[0] - img_w / 2
+    dy_pix = p_undistorted[1] - img_h / 2
 
     ground_w = 2 * altitude * math.tan(math.radians(hfov / 2))
     ground_h = 2 * altitude * math.tan(math.radians(vfov / 2))
@@ -98,7 +110,7 @@ saved_points = set()
 
 # ===================== RUN YOLO =====================
 results = model(
-    img,
+    img_undistorted,
     imgsz=416,
     conf=CONF_TH,
     classes=VISDRONE_HUMAN_CLASSES,
@@ -124,7 +136,7 @@ for r in results:
             u, v,
             HFOV, VFOV,
             img_w, img_h,
-            BEARING_DRONE_RAD
+            BEARING_DRONE_RAD, K
         )
 
         key = (round(lat_p, 7), round(lon_p, 7))
@@ -133,8 +145,10 @@ for r in results:
             saved_points.add(key)
 
         # Visualization
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.circle(img, (u, v), 5, (0, 255, 0), -1)
+        cv2.rectangle(img_undistorted, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(img_undistorted, (u, v), 5, (0, 255, 0), -1)
+
+        break  # Only process the first detected pedestrian per image
 
 # ===================== CLEANUP =====================
 csv_file.close()

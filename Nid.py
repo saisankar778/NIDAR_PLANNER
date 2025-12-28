@@ -429,8 +429,8 @@ def capture_frames():
 def video_feed():
     global cap, video_thread_started
     if cap is None:
-        #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
+        #cap = cv2.VideoCapture(0)
         # Optionally set resolution if supported by the RTSP stream
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
