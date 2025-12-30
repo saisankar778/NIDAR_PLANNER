@@ -1,9 +1,9 @@
 {
   "drone": {
-    "latitude": 16.4613841,
-    "longitude": 80.5081791,
-    "altitude_m": 29.998,
-    "bearing_angle_deg": -179.88842871976874
+    "latitude": 16.4613671,
+    "longitude": 80.508179,
+    "altitude_m": 29.986,
+    "bearing_angle_deg": -179.9532199489623
   },
   "image": {
     "path": "person8.jpg"

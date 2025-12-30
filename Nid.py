@@ -679,18 +679,6 @@ def monitor_geofence(drone_id):
 
                     print(f"[Drone {drone_id}] Activating rescue mechanism...")
                     activate_servo(vehicle, drone_id=1)
-                    # Log PERSON GPS (calculated)
-                    with open(DRONE_LOGS_FILE, "a", newline="") as csvfile:
-                        writer = csv.writer(csvfile)
-                        writer.writerow([
-                            "Person Detected - Drone 1",
-                            person_lat,
-                            person_lon,
-                            alt,
-                            time.strftime("%Y-%m-%d %H:%M:%S")
-                        ])
-
-                    print(f"Person GPS logged: {person_lat}, {person_lon}")
 
                     detected_person = None
                     human_frame_count = 0
@@ -720,7 +708,7 @@ def monitor_person_detection_and_start_drone2():
                         with open(DRONE_LOGS_FILE, newline='') as csvfile:
                             reader = csv.reader(csvfile)
                             for row in reader:
-                                if row and row[0].startswith("Person Detected - Drone 1"):
+                                if row and row[0].startswith("Person Detected"):
                                     count += 1
                 print(f"Person count: {count}")  # Debugging line
                 if count >= DRONE2_PERSON_LIMIT and not drone2_mission_started:
@@ -1229,7 +1217,7 @@ def person_locations():
             with open(DRONE_LOGS_FILE, newline='') as csvfile:
                 reader = csv.reader(csvfile)
                 for row in reader:
-                    if row and row[0].startswith("Person Detected - Drone 1"):
+                    if row and row[0].startswith("Person Detected"):
                         locations.append({
                             "id": row[0],
                             "latitude": row[1],
