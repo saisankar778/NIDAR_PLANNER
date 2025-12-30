@@ -40,9 +40,9 @@ PERSON_IMAGE_DIR = "person_images"
 # Drone Configuration
 DRONE_CONFIG = {
     1: {  # Drone 1 (Mapping)
-            'default_altitude': 10,  # meters
+            'default_altitude': 30,  # meters
             'default_speed': 5,     # m/s
-            'rtl_altitude': 5       # meters
+            'rtl_altitude': 30       # meters
         },
         2: {  # Drone 2 (Rescue)
             'default_altitude': 5,  # meters
@@ -429,8 +429,8 @@ def capture_frames():
 def video_feed():
     global cap, video_thread_started
     if cap is None:
-        cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
-        #cap = cv2.VideoCapture(0)
+        #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
+        cap = cv2.VideoCapture(1)
         # Optionally set resolution if supported by the RTSP stream
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -1038,7 +1038,7 @@ def connect_drone():
         connection_string = data.get('connection_string', '127.0.0.1:5760')
 
         try:
-            vehicle = connect(connection_string, wait_ready=True)
+            vehicle = connect(connection_string, wait_ready=True,timeout=60)
             drones[drone_id]["vehicle"] = vehicle
             drones[drone_id]["connected"] = True
             # set home_position for drone 1 if we have a fix

@@ -98,9 +98,9 @@ print(f"Drone Telemetry: lat={lat}, lon={lon}, alt={alt}, roll={roll}, pitch={pi
 
 # ===================== LIVE CAMERA FEED WITH CAPTURE BUTTON =====================
 
-rtsp_url = "rtsp://192.168.144.25:8554/main.264"
-cap = RTSPVideoStream(rtsp_url)
-#cap = cv2.VideoCapture(0)  # Change index/RTSP as needed
+#rtsp_url = "rtsp://192.168.144.25:8554/main.264"
+#cap = RTSPVideoStream(rtsp_url)
+cap = cv2.VideoCapture(0)  # Change index/RTSP as needed
 cv2.namedWindow('Drone Camera', cv2.WND_PROP_FULLSCREEN)
 cv2.setWindowProperty('Drone Camera', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
