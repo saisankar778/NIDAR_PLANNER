@@ -45,7 +45,7 @@ DRONE_CONFIG = {
             'rtl_altitude': 30       # meters
         },
         2: {  # Drone 2 (Rescue)
-            'default_altitude': 5,  # meters
+            'default_altitude': 15,  # meters
             'lowered_altitude': 2,   # meters (for rescue operations)
             'default_speed': 5,      # m/s
             'rtl_altitude': 5,      # meters
@@ -157,7 +157,7 @@ def calculate_person_gps_from_frame(frame, vehicle):
     global detected_person, human_frame_count
     img_h, img_w = frame.shape[:2]
 
-    results = model(frame, imgsz=416, conf=CONF_TH, iou=0.45, verbose=False)
+    results = model(frame, imgsz=640, conf=CONF_TH, iou=0.45, verbose=False)
 
     detected_this_frame = False
 
@@ -368,25 +368,13 @@ def start_drone2_mission():
                     print(f"Navigating to: {nearest_point}")
                     navigate_to(vehicle, nearest_point[0], nearest_point[1])
                     
-                    # Lower altitude for rescue operation
-                    print(f"Lowering to {config['lowered_altitude']}m for rescue operation")
-                    if change_altitude(vehicle, config['lowered_altitude']):
-                        # Activate servo to drop rescue kit
-                        print("Activating rescue mechanism")
-                        activate_servo(vehicle, 
-                                    drone_id=2,
-                                    pwm_value=SERVO_CONFIG[2]['pwm_value'],
-                                    delay=SERVO_CONFIG[2]['delay'])
-                        
-                        # Return to default altitude
-                        print(f"Returning to default altitude: {config['default_altitude']}m")
-                        change_altitude(vehicle, config['default_altitude'])
-                        
-                        # Remove the coordinate from the list and log it
-                        remove_and_log_coordinate(nearest_point[0], nearest_point[1])
-                        print(f"Rescue operation completed at: {nearest_point}")
-                    else:
-                        print("Warning: Failed to reach target altitude for rescue operation")
+                    # Hover for 5 seconds at the point
+                    print("Hovering at point for 5 seconds...")
+                    time.sleep(5)
+                    
+                    # Remove the coordinate from the list and log it
+                    remove_and_log_coordinate(nearest_point[0], nearest_point[1])
+                    print(f"Point completed at: {nearest_point}")
                 else:
                     # No coordinates left; RTL only when Drone 1 assigned waypoints are completed
                     # (Both conditions: CSV empty AND waypoints completed)
@@ -404,13 +392,13 @@ def start_drone2_mission():
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # VisDrone-specific configuration
 VISDRONE_HUMAN_CLASSES = [0, 1]  # 0=pedestrian, 1=people
-CONF_TH = 0.35                    # tuned for 50m no-zoom flight
-MIN_BBOX_AREA = 400               # reject far / noise detections
+CONF_TH = 0.15                    # tuned for 50m no-zoom flight
+MIN_BBOX_AREA = 300               # reject far / noise detections
 HUMAN_FRAME_THRESHOLD = 1         # require 3 consecutive detections
 human_frame_count = 0             # track consecutive detections
 detected_person = None
 
-model = YOLO("yolov8n.pt").to(device)  # Using custom trained VisDrone model
+model = YOLO("best.pt").to(device)  # Using custom trained VisDrone model
 cap = None
 frame = None
 lock = threading.Lock()
@@ -429,8 +417,8 @@ def capture_frames():
 def video_feed():
     global cap, video_thread_started
     if cap is None:
-        #cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
-        cap = cv2.VideoCapture(1)
+        cap = cv2.VideoCapture("rtsp://192.168.144.25:8554/main.264")
+        #cap = cv2.VideoCapture(1)
         # Optionally set resolution if supported by the RTSP stream
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -625,11 +613,15 @@ def monitor_geofence(drone_id):
                     while vehicle.mode.name != "GUIDED":
                         time.sleep(0.5)
                     
-                    # Hover for 10 seconds, but capture image+json at 4 seconds
-                    hover_duration = 10
-                    capture_time = 4
+                    # Hover for 5 seconds, activate servo during hover
+                    hover_duration = 5
+                    capture_time = 2
                     capture_done = False
                     hover_start = time.time()
+                    # Start servo in parallel
+                    import threading
+                    servo_thread = threading.Thread(target=activate_servo, args=(vehicle, 1, SERVO_CONFIG[1]['pwm_value'], 5))
+                    servo_thread.start()
                     while time.time() - hover_start < hover_duration:
                         elapsed = time.time() - hover_start
                         if (not capture_done) and elapsed >= capture_time:
@@ -676,9 +668,8 @@ def monitor_geofence(drone_id):
                             except Exception as e:
                                 print(f"Failed to save person image: {e}")
                         time.sleep(0.1)
-
-                    print(f"[Drone {drone_id}] Activating rescue mechanism...")
-                    activate_servo(vehicle, drone_id=1)
+                    servo_thread.join()
+                    print(f"[Drone {drone_id}] Servo deactivated and hover complete.")
 
                     detected_person = None
                     human_frame_count = 0
@@ -692,7 +683,7 @@ def monitor_geofence(drone_id):
 
 
 # --- Add at the top, after your imports ---
-DRONE2_PERSON_LIMIT = 5  # Start Drone 2 when 5 persons detected
+DRONE2_PERSON_LIMIT = 2  # Start Drone 2 when 5 persons detected
 drone2_mission_started = False
 drone1_rtl_triggered = False
 drone1_mission_completed = False
@@ -1180,26 +1171,12 @@ def person_detected():
                 pwm_value=SERVO_CONFIG[1]['pwm_value'],
                 delay=SERVO_CONFIG[1]['delay']
             )
-            # Log to CSV file
-            location = vehicle.location.global_frame
-            if location:
-                with open("drone_logs.csv", "a", newline="") as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow([
-                        f"Person Detected - Drone 1",
-                        location.lat,
-                        location.lon,
-                        location.alt,
-                        time.strftime("%Y-%m-%d %H:%M:%S")
-                    ])
-                log_person_detection(location.lat, location.lon, location.alt)
-                print(f"Drone {drone_id} location sent to CSV!")
-            # Resume mission
+            
             vehicle.mode = VehicleMode("AUTO")
             return jsonify({
                 "success": True,
                 "message": "Person detected action completed",
-                "ui_comment": "Person Detected! Hovering for 10 seconds. Location sent to CSV!"
+                "ui_comment": "Person Detected! Hovering for 5 seconds. Rescue mechanism activated!"
             })
         except Exception as e:
             return jsonify({"success": False, "error": str(e)}), 500
@@ -1262,7 +1239,8 @@ def monitor_drone1_mission_completion(vehicle, mission_length):
                 # Mark assigned waypoints completed when RTL command is reached (CSV detection stops)
                 if (not drone1_waypoints_completed) and next_wp >= (mission_length - 1):
                     drone1_waypoints_completed = True
-                    print("Drone 1 assigned waypoints completed (approaching RTL).")
+                    print("Drone 1 assigned waypoints completed (approaching RTL). Returning to Launch.")
+                    vehicle.mode = VehicleMode("RTL")
                 if next_wp == mission_length:  # All waypoints done (after RTL)
                     drone1_mission_completed = True
                     print("Drone 1 mission marked as complete.")
