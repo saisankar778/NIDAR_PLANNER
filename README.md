@@ -93,11 +93,11 @@ Place your project screenshots and diagrams in the repository to make the interf
 
 ### 1. Web UI & Mission Planner Dashboard
 Place your web UI screenshot at `static/mission_planner_screenshot.jpg`.
-![Web UI & Mission Planner Dashboard](static/mission_planner_screenshot.jpg)
+![Web UI & Mission Planner Dashboard](static/mission_planner_screenshot.png)
 
 ### 2. YOLOv8 Real-Time Detection Feed
 Place an image showing the YOLOv8 person detection overlay at `static/yolov8_detection_feed.jpg`.
-![YOLOv8 Real-Time Detection Feed](static/yolov8_detection_feed.jpg)
+![YOLOv8 Real-Time Detection Feed](static/yolov8_detection_feed.png)
 
 ### 3. Hardware / Simulation Environment Setup
 Place a photo or screenshot of your hardware setup or SITL environment at `static/system_setup.jpg`.
