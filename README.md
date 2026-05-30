@@ -87,21 +87,23 @@ The entire orchestration is managed by a lightweight Flask REST API, offering re
 
 ---
 
-## Image Placeholders
+## System Media & Demonstrations
 
-Place your project screenshots and diagrams in the repository to make the interface clear to users. You can place your files in a `/static` or `/docs` directory.
+### Project Demo Video
+Watch the full mission demonstration video showing two-drone autonomous coordination, real-time person detection, geofencing, and automated package delivery.
+
+<video src="static/NIDAR_DEMO.mp4" controls width="100%"></video>
+
+*If the video player does not load, you can download or play the file directly: [NIDAR Demo Video](static/NIDAR_DEMO.mp4).*
 
 ### 1. Web UI & Mission Planner Dashboard
-Place your web UI screenshot at `static/mission_planner_screenshot.jpg`.
 ![Web UI & Mission Planner Dashboard](static/mission_planner_screenshot.png)
 
 ### 2. YOLOv8 Real-Time Detection Feed
-Place an image showing the YOLOv8 person detection overlay at `static/yolov8_detection_feed.jpg`.
 ![YOLOv8 Real-Time Detection Feed](static/yolov8_detection_feed.png)
 
 ### 3. Hardware / Simulation Environment Setup
-Place a photo or screenshot of your hardware setup or SITL environment at `static/system_setup.jpg`.
-![System Setup](static/system_setup.jpg)
+![System Setup](static/system_setup.png)
 
 ---
 
@@ -123,9 +125,10 @@ NIADR/
 │   ├── D.png                  # Drone 1 icon for map rendering
 │   ├── D2.png                 # Drone 2 icon for map rendering
 │   ├── person.png             # Survivor marker icon
-│   ├── mission_planner_screenshot.jpg # Placeholder for Web UI screenshot
-│   ├── yolov8_detection_feed.jpg      # Placeholder for YOLOv8 detection screenshot
-│   └── system_setup.jpg               # Placeholder for hardware setup screenshot
+│   ├── NIDAR_DEMO.mp4                 # Project mission demonstration video
+│   ├── mission_planner_screenshot.png # Web UI mission planning dashboard screenshot
+│   ├── yolov8_detection_feed.png      # YOLOv8 live person detection feed screenshot
+│   └── system_setup.png               # Hardware/simulation environment setup photo
 │
 ├── uploads/                   # Target directory for uploaded KML polygon files
 ├── person_images/             # Saved cropped/full images of detected survivors and associated telemetry JSON files
