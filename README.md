@@ -92,11 +92,11 @@ The entire orchestration is managed by a lightweight Flask REST API, offering re
 Place your project screenshots and diagrams in the repository to make the interface clear to users. You can place your files in a `/static` or `/docs` directory.
 
 ### 1. Web UI & Mission Planner Dashboard
-Place your web UI screenshot at `static/mission_planner_screenshot.jpg`.
+
 ![Web UI & Mission Planner Dashboard](static/mission_planner_screenshot.png)
 
 ### 2. YOLOv8 Real-Time Detection Feed
-Place an image showing the YOLOv8 person detection overlay at `static/yolov8_detection_feed.jpg`.
+
 ![YOLOv8 Real-Time Detection Feed](static/yolov8_detection_feed.png)
 
 ### 3. Hardware / Simulation Environment Setup
